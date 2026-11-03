@@ -1414,6 +1414,7 @@ async function tween(p, tx, ty, ms) {
     const e = k < .5 ? 2 * k * k : 1 - Math.pow(-2 * k + 2, 2) / 2;
     const air = Math.sin(k * Math.PI);
     setTok(p, sx + (tx - sx) * e, sy + (ty - sy) * e - air * 26, 1 - air * .1, 1 + air * .18, dir * air * 14);
+    camTrack(p, sx + (tx - sx) * e, sy + (ty - sy) * e);
     const swing = Math.sin(k * Math.PI * 2) * 30;               // walking stride: legs one way, arms the other
     pose(p, swing * .8 + air * 25, -swing * .8 - air * 25, -swing, swing);
   });
@@ -1443,6 +1444,7 @@ async function cannonFly(p, to) {
   const t = { x: c.x, y: c.y + (SIZES[to] > 1.3 ? 48 : 0) };   // big spaces: land along the bottom, where pieces stand
   if (FX_OFF) { p.x = t.x; p.y = t.y; positionTokens(); return; }
   const sx = p.x, sy = p.y, cx = (sx + t.x) / 2, cy = Math.min(sy, t.y) - 230;
+  const tracking = await camStart(p);   // the camera rides along with the flying monkey
   p.animating = true;
   p.bob.classList.remove("bob");
   p.g.parentNode.appendChild(p.g);
@@ -1452,6 +1454,7 @@ async function cannonFly(p, to) {
     const y = (1 - k) * (1 - k) * sy + 2 * (1 - k) * k * cy + k * k * t.y;
     const s = 1 + Math.sin(k * Math.PI) * .7;
     setTok(p, x, y, s, s, spins * k);
+    camTrack(p, x, y, CAM_W * (1 + Math.sin(k * Math.PI) * .35));   // pull back a little at the top of the arc
     const flail = Math.sin(k * 60) * 25;                        // arms waving over its head, legs kicking
     pose(p, 150 + flail, -150 - flail, Math.sin(k * 45) * 40, -Math.sin(k * 45) * 40);
   });
@@ -1460,6 +1463,7 @@ async function cannonFly(p, to) {
   dust(t.x, t.y + 18);
   await animate(160, k => { const sq = Math.sin(k * Math.PI) * .3; setTok(p, t.x, t.y, 1 + sq, 1 - sq, 0); });
   p.x = t.x; p.y = t.y; p.animating = false;
+  if (tracking) camFollow = null;
   positionTokens();
 }
 const stepMs = () => Math.max(110, speed * 0.32);
@@ -1817,6 +1821,23 @@ async function zoomTo(target, ms) {
     setView(from.map((v, i) => v + (target[i] - v) * e));
   });
 }
+// Follow camera: while a monkey moves, the board zooms in and tracks it; the landing spotlight then takes over.
+// (Skipped for computer monkeys on Fast, like the spotlight.)
+const CAM_W = 640;
+let camFollow = null;
+const camWanted = p => !FX_OFF && (p.human || speed >= 300);
+async function camStart(p) {
+  if (!camWanted(p) || camFollow) return false;
+  await zoomTo(viewAround(tokAt(p), CAM_W), 380);
+  camFollow = p;
+  return true;
+}
+function camTrack(p, x, y, w = CAM_W) { if (camFollow === p) setView(viewAround({ x, y }, w)); }
+// make sure the whole board is showing again (end of a move that had no landing spotlight, end of a turn)
+async function camReset() {
+  camFollow = null;
+  if (!FX_OFF && view[2] !== FULL_VIEW[2]) await zoomTo(FULL_VIEW, 380);
+}
 async function spotlight(p) {
   if (FX_OFF || (!p.human && speed < 300)) return;
   // fade the pieces standing on the space so its words show through
@@ -1860,6 +1881,7 @@ function previewDest(pos, steps) {
 // Returns true if the whole roll was used (an "exact" landing), false if a stop space cut it short.
 async function moveForward(p, steps) {
   let exact = true;
+  const tracking = await camStart(p);
   for (let s = 0; s < steps; s++) {
     p.pos = (p.pos + 1) % N;
     const t = spacePts[p.pos];
@@ -1869,6 +1891,7 @@ async function moveForward(p, steps) {
       break;
     }
   }
+  if (tracking) camFollow = null;   // stay zoomed in; the landing spotlight takes it from here
   positionTokens();
   return exact;
 }
@@ -2137,7 +2160,9 @@ async function loseBananas(p, n, mood) {
 }
 async function slideBack(p, steps) {
   const to = backDest(p.pos, steps);
+  const tracking = await camStart(p);
   while (p.pos !== to) { p.pos -= 1; const t = spacePts[p.pos]; await tween(p, t.x, t.y, stepMs()); }
+  if (tracking) camFollow = null;
   positionTokens();
 }
 // Everyone with bananas gives this monkey one (the Happy Birthday space and the Birthday Surprise card).
@@ -2337,9 +2362,12 @@ async function fireCannon(p, depth) {
 async function exactGift(p) {
   if (!p.exactLand) return;
   p.exactLand = false;
-  log(`lands on the ${SPACES[p.pos].n} with an exact roll — a free banana!`, p);
+  // at the Banana Farm the gift comes after the leftovers spoil, so it carries into the new round
+  log(p.pos === 0
+    ? "lands on the Banana Farm with an exact roll — a free banana that carries into the new round!"
+    : `lands on the ${SPACES[p.pos].n} with an exact roll — a free banana!`, p);
   await fly("banana", BOWL, tokAt(p), 1, { lift: 120 });
-  floatText(tokAt(p), "+1 🍌", "#f9a825");
+  floatText(tokAt(p), p.pos === 0 ? "+1 🍌 keep it!" : "+1 🍌", "#f9a825");
   react(p, "Happy");
   p.bananas += 1;
   render();
@@ -2549,6 +2577,7 @@ async function takeTurn(p) {
       p.exactLand = false;
     }
   }
+  await camReset();
   if (S.winner) return;
   if (p.human) await humanEnd(p);
   else await AI.endTurn(p);
@@ -2766,6 +2795,27 @@ if (TEST) (async () => {
     el("use", { href: "#cannon", x: 30, y: 230, width: 250, height: 250 }, art);
     drawMonkey(el("g", { transform: "translate(282 250) scale(2.9)" }, art), FACES[0]);
     icon("banana", 418, 104, 120, art);
+    return;
+  }
+  if (location.search.includes("farmtest")) {
+    // exact roll onto the Banana Farm: leftovers spoil, the gift banana stays and is still there after buying
+    S = newState({ kind: "girl", color: PIECES[0][1], name: "P1" }, 1, 25);
+    S.players.forEach(q => { q.human = false; });
+    placeTokens();
+    const p = S.players[0];
+    p.pos = 30; p.bananas = 5;
+    const exact = await moveForward(p, 4);          // spaces 32, 33, 34, then the Banana Farm
+    p.exactLand = exact && isStop(p.pos);
+    await resolve(p, 0);
+    const afterLanding = p.bananas;
+    await farmBuy(p);
+    out.textContent += `exact landing: ${exact} · at farm: ${p.pos === 0} · bananas after landing: ${afterLanding} (expect 1)` +
+                       ` · after buying next round: ${p.bananas} (gift + bought)\n`;
+    S.players[0].pos = 30; S.players[0].bananas = 5;
+    const exact2 = await moveForward(S.players[0], 6);   // overshoots — stops at the farm, not exact
+    S.players[0].exactLand = exact2 && isStop(S.players[0].pos);
+    await resolve(S.players[0], 0);
+    out.textContent += `overshoot roll exact: ${exact2} · bananas after landing: ${S.players[0].bananas} (expect 0)\nDONE\n`;
     return;
   }
   if (location.search.includes("cardtest")) {
