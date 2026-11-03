@@ -62,6 +62,8 @@
   .roomcode { font-family: "Luckiest Guy", "Fredoka", sans-serif; font-size: 40px; letter-spacing: 6px; color: #2e7d32; margin: 4px 0; text-align: center; }
   .lobbyp { display: inline-block; border: 3px solid; border-radius: 20px; padding: 2px 10px; margin: 2px 4px 2px 0; background: #fffdf5; }
   #remoteBox { display: none; }
+  #publicBox { background: #fff; border-radius: 12px; padding: 4px 12px 10px; margin-top: 8px; }
+  .pubroom { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 0; border-bottom: 1px dashed #c8e6c9; }
   .ioshint { font-size: 13px; color: #6d4c41; background: #fff3e0; border-radius: 10px; padding: 6px 10px; margin: 8px 0 0; }
   #board { width: 100%; height: auto; border-radius: 28px; box-shadow: 0 10px 40px rgba(0,0,0,.45); display: block; }
   .label { font-family: "Fredoka", sans-serif; font-weight: 600; font-size: 11px; fill: var(--ink); text-anchor: middle; }
@@ -324,8 +326,10 @@
         <label>Room code <input id="joinCode" maxlength="8" size="8" autocomplete="off" autocapitalize="characters"></label>
         <button id="joinBtn">Join a game</button>
       </div>
+      <p class="center"><button class="primary" id="publicBtn">🌴 Play with strangers (public lobby)</button></p>
       <p id="netErr"></p>
       <div id="lobbyBox" hidden></div>
+      <div id="publicBox" hidden></div>
     </div>
     <p class="ioshint center" id="iosHint" hidden>📲 To install on iPhone or iPad: tap the <b>Share</b> button, then <b>Add to Home Screen</b>.</p>
   </div>
@@ -1655,14 +1659,14 @@ function guestLeft(id) {
 
 // online everyone needs a real name ("You" would be confusing on the other screens)
 const myName = fallback => { const n = $("#pname").value.trim(); return !n || n.toLowerCase() === "you" ? fallback : n; };
-// Hosting: open a room, collect guests in the lobby, then start.
-async function hostGame() {
+// Hosting: open a room, collect guests in the lobby, then start. A public room is also listed in the public lobby.
+async function hostGame(isPublic = false) {
   const err = $("#netErr"); err.textContent = "";
   try { await loadPeer(); } catch (e) { err.textContent = e.message; return; }
-  NET.role = "host"; NET.code = newCode();
-  NET.lobby = [{ id: "host", name: myName("Host"), kind: choice.kind, color: choice.color }];
+  NET.role = "host"; NET.code = newCode(); NET.public = isPublic;
+  NET.lobby = [{ id: "host", name: isPublic ? nick() : myName("Host"), kind: choice.kind, color: choice.color }];
   NET.peer = new Peer(PEER_PREFIX + NET.code);
-  NET.peer.on("open", () => { showLobby(); });
+  NET.peer.on("open", () => { showLobby(); advertise(); });
   NET.peer.on("error", e => { err.textContent = "Online play problem: " + (e.type || e.message); });
   // heartbeat: a guest who has gone quiet for 45 seconds (closed the page, lost signal) is handed to a computer monkey
   setInterval(() => {
@@ -1690,8 +1694,10 @@ async function hostGame() {
 function lobbyChanged() {
   if (NET.role !== "host") return;
   netSend({ t: "lobby", lobby: NET.lobby.map(({ name, kind, color }) => ({ name, kind, color })) });
-  showLobby();
+  showLobby(); advertise();
 }
+// keep this room's entry in the public lobby up to date (or take it down once the game starts)
+const advertise = () => { if (NET.public) lobbySetRoom(S ? null : { code: NET.code, host: NET.lobby[0].name, players: NET.lobby.length, max: 4 }); };
 function lobbyList(list) {
   return list.map(g => `<span class="lobbyp" style="border-color:${g.color}">${g.kind === "girl" ? "👧" : "👦"} ${g.name}</span>`).join("");
 }
@@ -1702,7 +1708,8 @@ function showLobby() {
   const guests = NET.lobby.length - 1;
   box.innerHTML = `<h3>🌐 Your online room</h3>
     <p class="roomcode">${NET.code}</p>
-    <p>Tell your friends to open <b>${url}</b>, tap <b>Join a game</b>, and type this code.</p>
+    ${NET.public ? `<p>🌴 Your game is listed in the <b>public lobby</b> — anyone looking for a game can join. You're <b>${NET.lobby[0].name}</b>.
+      Friends can also join with the code.</p>` : `<p>Tell your friends to open <b>${url}</b>, tap <b>Join a game</b>, and type this code.</p>`}
     <p><b>In the room:</b> ${lobbyList(NET.lobby)}</p>
     <p><label>Computer monkeys to add <select id="netAI">${[0, 1, 2, 3].filter(n => n + NET.lobby.length <= 4)
       .map(n => `<option${n === Math.max(0, Math.min(1, 4 - NET.lobby.length)) ? " selected" : ""}>${n}</option>`).join("")}</select></label></p>
@@ -1725,6 +1732,8 @@ function startOnline() {
     cds: [], loan: null, letters: {}, boughtLetter: false
   }));
   S.online = true;
+  advertise();
+  $("#publicBox").hidden = true;
   seats.forEach((s, i) => { if (s.remote) netSend({ t: "start", seat: i }, s.remote); });
   $("#setup").hidden = true; $("#winner").hidden = true; $("#saveBtn").hidden = true;
   $("#log").innerHTML = "";
@@ -1737,20 +1746,24 @@ function startOnline() {
 }
 
 // Joining: connect to the host's room and show their game.
-async function joinGame() {
+async function joinGame(fromLobby = null) {
   const err = $("#netErr"); err.textContent = "";
-  const code = ($("#joinCode").value || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+  const code = (fromLobby || $("#joinCode").value || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+  if (fromLobby) NET.public = true;
   if (code.length < 4) { err.textContent = "Type the room code your friend gave you."; return; }
   try { await loadPeer(); } catch (e) { err.textContent = e.message; return; }
   SFX.init();
   NET.role = "guest"; NET.code = code;
   NET.peer = new Peer();
-  NET.peer.on("error", e => { err.textContent = e.type === "peer-unavailable" ? "No room with that code — check it and try again." : "Online play problem: " + (e.type || e.message); });
+  NET.peer.on("error", e => {
+    err.textContent = e.type === "peer-unavailable" ? "No room with that code — check it and try again." : "Online play problem: " + (e.type || e.message);
+    if (!S) guestReset();
+  });
   NET.peer.on("open", () => {
     const c = NET.peer.connect(PEER_PREFIX + code, { reliable: true, serialization: "json" });
     NET.host = c;
     c.on("open", () => {
-      c.send({ t: "hello", name: myName("Friend"), kind: choice.kind, color: choice.color });
+      c.send({ t: "hello", name: NET.public ? nick() : myName("Friend"), kind: choice.kind, color: choice.color });
       $("#lobbyBox").hidden = false;
       $("#lobbyBox").innerHTML = `<h3>🌐 Joined room ${code}</h3><p>Waiting for the host to start the game…</p>`;
     });
@@ -1761,8 +1774,17 @@ async function joinGame() {
   });
   window.addEventListener("pagehide", () => toHost({ t: "bye" }));
 }
+// a join that didn't work out: back to the start screen, ready to try again
+function guestReset() {
+  const p = NET.peer;
+  Object.assign(NET, { role: null, peer: null, host: null, code: null });
+  setTimeout(() => { try { p && p.destroy(); } catch (e) {} }, 300);
+  $("#lobbyBox").hidden = true;
+  $("#hostBtn").disabled = $("#joinBtn").disabled = false;
+  renderPublic();
+}
 function hostLost() {
-  if (NET.lost || (S && S.winner)) return;
+  if (NET.role !== "guest" || NET.lost || (S && S.winner)) return;
   NET.lost = true;
   $("#winTitle").textContent = "Connection lost";
   $("#winBody").innerHTML = "<p>The connection to the host's game ended. Ask them to start a new room and join again.</p>";
@@ -1774,7 +1796,7 @@ let fxQueue = Promise.resolve(), fxBusy = 0, guestCard = null;
 function guestHandle(m) {
   switch (m.t) {
     case "lobby": $("#lobbyBox").innerHTML = `<h3>🌐 Joined room ${NET.code}</h3><p><b>In the room:</b> ${lobbyList(m.lobby)}</p><p>Waiting for the host to start the game…</p>`; break;
-    case "full": $("#netErr").textContent = "That game is full or already started."; break;
+    case "full": $("#netErr").textContent = "That game is full or already started — try another one."; guestReset(); break;
     case "start":
       NET.mySeat = m.seat;
       $("#setup").hidden = true; $("#saveBtn").hidden = true; $("#log").innerHTML = "";
@@ -1839,6 +1861,117 @@ async function guestFx(fx, a) {
   }
 }
 const netSfx = name => netSend({ t: "sfx", s: name });
+
+// ---------- public lobby: play with strangers ----------
+// There's no game server: the first person to open the lobby quietly becomes its "keeper" (a fixed connection
+// name everyone else dials) and keeps the list of open public games. If the keeper closes the app, the next
+// person in the lobby takes over and everyone re-lists their games.
+const LOBBY_ID = PEER_PREFIX + "lobby-v1";
+const LOB = { on: false, peer: null, conn: null, keeper: false, conns: {}, seen: {}, rooms: {}, list: [], people: 0,
+              myRoom: null, lastKeeper: 0, tryAt: 0, retryT: null };
+// in public games everyone gets a jungle nickname, so real names aren't shown to strangers
+const NICK_A = ["Bouncy", "Silly", "Zippy", "Giggly", "Wiggly", "Sunny", "Jumpy", "Cheeky", "Fuzzy", "Snappy", "Happy", "Speedy"];
+const NICK_B = ["Mango", "Coconut", "Banana", "Papaya", "Kiwi", "Peanut", "Noodle", "Pickle", "Muffin", "Biscuit", "Jellybean", "Pancake"];
+let myNick = null;
+const nick = () => myNick || (myNick = pick(NICK_A) + " " + pick(NICK_B));
+function lobbyStart() {
+  if (LOB.on || TEST) return;
+  LOB.on = true;
+  loadPeer().then(lobbyClaim).catch(e => { $("#netErr").textContent = e.message; });
+  setInterval(lobbyTick, 4000);
+}
+// try to become the keeper; if someone already is, connect to them instead
+function lobbyClaim() {
+  if (LOB.peer) try { LOB.peer.destroy(); } catch (e) {}
+  Object.assign(LOB, { keeper: false, conn: null, conns: {}, seen: {}, rooms: {}, tryAt: Date.now() });
+  const peer = LOB.peer = new Peer(LOBBY_ID);
+  peer.on("open", () => { LOB.keeper = true; lobbyPublish(); });
+  peer.on("connection", c => {
+    LOB.conns[c.peer] = c; LOB.seen[c.peer] = Date.now();
+    c.on("open", lobbyPublish);
+    c.on("data", m => {
+      LOB.seen[c.peer] = Date.now();
+      if (m.t === "room") { if (m.room) LOB.rooms[c.peer] = m.room; else delete LOB.rooms[c.peer]; lobbyPublish(); }
+    });
+    c.on("close", () => { delete LOB.conns[c.peer]; delete LOB.rooms[c.peer]; lobbyPublish(); });
+  });
+  peer.on("error", e => {
+    if (peer !== LOB.peer) return;
+    if (e.type === "unavailable-id") lobbyDial(); else lobbyRetry();
+  });
+}
+function lobbyDial() {
+  try { LOB.peer.destroy(); } catch (e) {}
+  LOB.tryAt = Date.now();
+  const peer = LOB.peer = new Peer();
+  peer.on("open", () => {
+    const c = peer.connect(LOBBY_ID, { reliable: true, serialization: "json" });
+    c.on("open", () => { LOB.conn = c; LOB.lastKeeper = Date.now(); c.send({ t: "room", room: LOB.myRoom }); });
+    c.on("data", m => {
+      LOB.lastKeeper = Date.now();
+      if (m.t === "rooms") { LOB.list = m.list; LOB.people = m.people; renderPublic(); }
+    });
+    c.on("close", () => { if (LOB.conn === c) lobbyRetry(); });
+  });
+  peer.on("error", () => { if (peer === LOB.peer) lobbyRetry(); });
+}
+function lobbyRetry() {
+  LOB.conn = null; LOB.keeper = false;
+  clearTimeout(LOB.retryT);
+  LOB.retryT = setTimeout(lobbyClaim, 500 + Math.random() * 2500);   // spread out so two people don't keep colliding
+}
+function lobbyTick() {
+  const now = Date.now();
+  if (LOB.keeper) {
+    Object.keys(LOB.conns).forEach(id => {
+      if (now - (LOB.seen[id] || now) > 20000) { try { LOB.conns[id].close(); } catch (e) {} delete LOB.conns[id]; delete LOB.rooms[id]; }
+    });
+    lobbyPublish();   // doubles as the keeper's heartbeat
+  } else if (LOB.conn) {
+    if (LOB.conn.open) LOB.conn.send({ t: "ping" });
+    if (now - LOB.lastKeeper > 20000) lobbyRetry();
+  } else if (now - LOB.tryAt > 15000) lobbyRetry();   // a connection attempt that never finished
+}
+// keeper: send the list of open games to everyone in the lobby
+function lobbyPublish() {
+  if (!LOB.keeper) return;
+  LOB.list = Object.values(LOB.rooms).concat(LOB.myRoom ? [LOB.myRoom] : []);
+  LOB.people = Object.keys(LOB.conns).length + 1;
+  const msg = { t: "rooms", list: LOB.list, people: LOB.people };
+  Object.values(LOB.conns).forEach(c => { if (c.open) try { c.send(msg); } catch (e) {} });
+  renderPublic();
+}
+function lobbySetRoom(room) {
+  LOB.myRoom = room;
+  if (room) lobbyStart();
+  if (LOB.keeper) lobbyPublish();
+  else if (LOB.conn && LOB.conn.open) LOB.conn.send({ t: "room", room });
+}
+// the public lobby panel on the start screen
+function openPublic() {
+  $("#publicBox").hidden = false;
+  lobbyStart();
+  renderPublic();
+}
+function renderPublic() {
+  const box = $("#publicBox");
+  if (box.hidden) return;
+  const busy = !!NET.role;
+  const open = LOB.list.filter(r => r.code !== NET.code && r.players < r.max);
+  const connected = LOB.keeper || (LOB.conn && LOB.conn.open);
+  box.innerHTML = `<h3>🌴 Public lobby</h3>
+    <p>${connected ? `${LOB.people} monke${LOB.people === 1 ? "y" : "ys"} in the lobby right now.` : "Finding the lobby…"}
+      In public games you're called <b>${nick()}</b>.</p>
+    ${open.length ? open.map(r => `<div class="pubroom"><span><b>${r.host}</b>'s game · ${r.players}/${r.max} players</span>
+        <button class="primary" data-code="${r.code}"${busy ? " disabled" : ""}>Join</button></div>`).join("")
+      : `<p><small>No open games yet. Host one and wait here — it shows up for everyone who opens the lobby.</small></p>`}
+    ${busy ? "" : `<p><button class="primary big" id="pubHost">Host a public game</button></p>`}`;
+  box.querySelectorAll("button[data-code]").forEach(b => b.onclick = () => {
+    $("#hostBtn").disabled = $("#joinBtn").disabled = true;
+    joinGame(b.dataset.code); renderPublic();
+  });
+  if ($("#pubHost")) $("#pubHost").onclick = () => { $("#hostBtn").disabled = $("#joinBtn").disabled = true; hostGame(true).then(renderPublic); };
+}
 
 // Human prompts. Text, limits and disabled states can be functions, so an open prompt
 // redraws (refreshPrompt) when your money changes — e.g. after a loan.
@@ -3075,6 +3208,7 @@ $("#newGame").onclick = () => {
 };
 $("#hostBtn").onclick = () => { $("#hostBtn").disabled = $("#joinBtn").disabled = true; hostGame(); };
 $("#joinBtn").onclick = () => { $("#hostBtn").disabled = $("#joinBtn").disabled = true; joinGame(); };
+$("#publicBtn").onclick = () => { $("#publicBtn").hidden = true; openPublic(); };
 // online: animations on the host are replayed on every guest's board
 diceFx = netFx("dice", diceFx);
 tween = netFx("tween", tween, (p, tx, ty, ms) => [seatOf(p), tx, ty, ms, p.x, p.y]);
