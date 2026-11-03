@@ -55,6 +55,13 @@
     .count input { height: 28px; }
   }
   #installBtn[hidden] { display: none; }
+  .online { background: #e8f5e9; border-radius: 14px; padding: 4px 14px 10px; margin-top: 14px; }
+  .online .row { align-items: center; }
+  #netErr { color: #c62828; font-weight: 600; margin: 6px 0 0; min-height: 0; }
+  #lobbyBox { background: #fff; border-radius: 12px; padding: 4px 12px 10px; margin-top: 8px; }
+  .roomcode { font-family: "Luckiest Guy", "Fredoka", sans-serif; font-size: 40px; letter-spacing: 6px; color: #2e7d32; margin: 4px 0; text-align: center; }
+  .lobbyp { display: inline-block; border: 3px solid; border-radius: 20px; padding: 2px 10px; margin: 2px 4px 2px 0; background: #fffdf5; }
+  #remoteBox { display: none; }
   .ioshint { font-size: 13px; color: #6d4c41; background: #fff3e0; border-radius: 10px; padding: 6px 10px; margin: 8px 0 0; }
   #board { width: 100%; height: auto; border-radius: 28px; box-shadow: 0 10px 40px rgba(0,0,0,.45); display: block; }
   .label { font-family: "Fredoka", sans-serif; font-weight: 600; font-size: 11px; fill: var(--ink); text-anchor: middle; }
@@ -257,6 +264,7 @@
     </div>
     <div id="toast" hidden></div>
     <div id="action"><p class="status">Pick your monkey to start.</p></div>
+    <div id="remoteBox" hidden></div>
     <div id="players"></div>
     <div id="loanBox"></div>
     <div class="toolbar">
@@ -308,6 +316,17 @@
       <label>Starting money $<input id="startMoney" type="number" min="5" max="200" value="25" style="width:70px"></label>
     </div>
     <p class="center" style="margin-top:18px"><button class="primary big" id="startBtn">Let's play! 🍌</button></p>
+    <div class="online">
+      <h3>🌐 Play online with friends</h3>
+      <div class="row">
+        <button id="hostBtn">Host a game</button>
+        <span>or</span>
+        <label>Room code <input id="joinCode" maxlength="8" size="8" autocomplete="off" autocapitalize="characters"></label>
+        <button id="joinBtn">Join a game</button>
+      </div>
+      <p id="netErr"></p>
+      <div id="lobbyBox" hidden></div>
+    </div>
     <p class="ioshint center" id="iosHint" hidden>📲 To install on iPhone or iPad: tap the <b>Share</b> button, then <b>Add to Home Screen</b>.</p>
   </div>
 </div>
@@ -1502,16 +1521,324 @@ function renderPlayers() {
     box.appendChild(d);
   });
 }
-function render() { stuck(); renderPlayers(); renderLoan(); drawLetters(); positionTokens(); }
+function render() { stuck(); renderPlayers(); renderLoan(); drawLetters(); positionTokens(); netState(); }
 function log(text, p) {
   stuckOps = 0;
   const d = document.createElement("div");
   d.innerHTML = (p ? `<i style="background:${p.color}"></i><b>${p.name}</b> ` : "") + text;
+  addLog(d.innerHTML);
+  netSend({ t: "log", html: d.innerHTML });
+}
+function addLog(html) {
+  const d = document.createElement("div");
+  d.innerHTML = html;
   $("#log").prepend(d);
   while ($("#log").children.length > 120) $("#log").lastChild.remove();
 }
-const actionBox = () => $("#action");
-function status(html) { actionBox().innerHTML = `<p class="status">${html}</p>`; }
+// Which player the game is currently asking something. On the host, a remote player's prompt is built in a
+// hidden box and sent to their device; the host's own box says who we're waiting for.
+let promptOwner = null;
+const you = p => { promptOwner = p; return p.human; };
+const isRemote = p => !!(p && p.remote);
+const actionBox = () => NET.role === "host" && isRemote(promptOwner) ? $("#remoteBox") : $("#action");
+function status(html) {
+  promptOwner = null;
+  $("#action").innerHTML = `<p class="status">${html}</p>`;
+}
+
+// ---------- online play ----------
+// The host's device runs the whole game. Guests join with a room code over a direct peer-to-peer link (PeerJS's
+// free public connection service). Each guest is a human seat: their prompts are sent to their device and their
+// taps come back; everyone gets the board state, the log and the animations.
+const NET = { role: null, peer: null, code: null, conns: {}, seen: {}, lobby: [], mySeat: null, host: null, lastHost: 0 };
+const PEER_PREFIX = "monkeycannon-";
+function loadPeer() {
+  if (window.Peer) return Promise.resolve();
+  return new Promise((res, rej) => {
+    const s = document.createElement("script");
+    s.src = "https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js";
+    s.onload = res; s.onerror = () => rej(new Error("Couldn't load the online-play helper. Check your internet connection."));
+    document.head.appendChild(s);
+  });
+}
+const newCode = () => Array.from({ length: 4 }, () => "ABCDEFGHJKMNPQRSTUVWXYZ"[Math.floor(Math.random() * 23)]).join("") + Math.floor(10 + Math.random() * 90);
+// host → everyone (or one guest)
+function netSend(msg, onlyId) {
+  if (NET.role !== "host") return;
+  Object.entries(NET.conns).forEach(([id, c]) => { if ((!onlyId || id === onlyId) && c.open) try { c.send(msg); } catch (e) {} });
+}
+// the parts of the game state guests need (no screen objects)
+const NET_SKIP = new Set(["g", "bob", "body", "limbs", "x", "y", "animating", "remote", "resumeAt", "decks"]);
+let stateTimer = null;
+function netState() {
+  if (NET.role !== "host" || !S || stateTimer) return;
+  stateTimer = setTimeout(() => {
+    stateTimer = null;
+    netSend({ t: "state", s: JSON.parse(JSON.stringify(S, (k, v) => NET_SKIP.has(k) ? undefined : v)) });
+  }, 60);
+}
+// Animations: on the host each one is also sent to the guests, who play it on their own board.
+let fxNest = 0;
+const seatOf = p => S.players.indexOf(p);
+function netFx(name, fn, pack) {
+  return function (...args) {
+    if (NET.role === "host" && !fxNest) netSend({ t: "fx", fx: name, a: pack ? pack(...args) : args });
+    fxNest++;
+    try { return fn.apply(this, args); } finally { fxNest--; }
+  };
+}
+// a prompt box as HTML, with sliders' current positions written in
+function boxHtml(box) {
+  const view = box.cloneNode(true);
+  const live = box.querySelectorAll("input");
+  view.querySelectorAll("input").forEach((x, i) => x.setAttribute("value", live[i].value));
+  return view.innerHTML;
+}
+// mirror the host's prompt box to whoever owns it, and the host's status box to everyone else
+function watchBoxes() {
+  let t1 = null, t2 = null;
+  new MutationObserver(() => {
+    clearTimeout(t1);
+    t1 = setTimeout(() => {
+      if (NET.role !== "host" || !isRemote(promptOwner)) return;
+      netSend({ t: "prompt", html: boxHtml($("#remoteBox")) }, promptOwner.remote);
+      const waitMsg = `⏳ Waiting for <b>${promptOwner.name}</b>…`;
+      if (!$("#action").innerHTML.includes(waitMsg)) $("#action").innerHTML = `<p class="status">${waitMsg}</p>`;
+    }, 25);
+  }).observe($("#remoteBox"), { childList: true, subtree: true, attributes: true, characterData: true });
+  new MutationObserver(() => {
+    clearTimeout(t2);
+    t2 = setTimeout(() => {
+      if (NET.role !== "host") return;
+      // guests see the host's status lines; while the host is choosing they're told who they're waiting for
+      // (the remote owner keeps their own prompt)
+      const box = $("#action"), who = promptOwner || (S && S.players[S.turn]);
+      const html = box.querySelector("button, input") && who ? `<p class="status">⏳ Waiting for <b>${who.name}</b>…</p>` : box.innerHTML;
+      Object.keys(NET.conns).forEach(id => { if (!(isRemote(promptOwner) && promptOwner.remote === id)) netSend({ t: "watch", html }, id); });
+    }, 40);
+  }).observe($("#action"), { childList: true, subtree: true, attributes: true, characterData: true });
+}
+// a guest tapped a button / moved a slider / used the loan box on their prompt
+function hostHandle(id, m) {
+  const seat = S && S.players.findIndex(q => q.remote === id);
+  const p = seat >= 0 ? S.players[seat] : null;
+  if (!p) return;
+  if (m.t === "click" && promptOwner === p) {
+    const b = $("#remoteBox").querySelectorAll("button")[m.i];
+    if (b && !b.disabled) b.click();
+  } else if (m.t === "range" && promptOwner === p) {
+    const r = $("#remoteBox").querySelectorAll("input[type=range]")[m.i];
+    if (r) { r.value = m.v; r.dispatchEvent(new Event("input")); }
+  } else if (m.t === "loan" && !S.winner) {
+    if (m.a === "repay" && p.loan && p.money >= p.loan.repay) repayLoan(p);
+    if (m.a === "take" && !p.loan && LOANS[m.i]) takeLoan(p, LOANS[m.i]);
+    render(); if (refreshPrompt) refreshPrompt();
+  }
+}
+// a guest left: a computer monkey takes over their seat (and answers anything they were in the middle of)
+function guestLeft(id) {
+  if (!NET.conns[id]) return;
+  delete NET.conns[id];
+  if (!S) { NET.lobby = NET.lobby.filter(g => g.id !== id); lobbyChanged(); return; }
+  const p = S.players.find(q => q.remote === id);
+  if (!p) return;
+  p.remote = null; p.human = false;
+  log("lost connection — a computer monkey takes over their seat.", p);
+  toast(`${p.name} left the game — a computer monkey is playing for them.`);
+  if (promptOwner === p) {
+    const box = $("#remoteBox");
+    const b = box.querySelector("button.primary:not([disabled])") || box.querySelector("button:not([disabled])");
+    if (b) b.click();
+  }
+  render();
+}
+
+// online everyone needs a real name ("You" would be confusing on the other screens)
+const myName = fallback => { const n = $("#pname").value.trim(); return !n || n.toLowerCase() === "you" ? fallback : n; };
+// Hosting: open a room, collect guests in the lobby, then start.
+async function hostGame() {
+  const err = $("#netErr"); err.textContent = "";
+  try { await loadPeer(); } catch (e) { err.textContent = e.message; return; }
+  NET.role = "host"; NET.code = newCode();
+  NET.lobby = [{ id: "host", name: myName("Host"), kind: choice.kind, color: choice.color }];
+  NET.peer = new Peer(PEER_PREFIX + NET.code);
+  NET.peer.on("open", () => { showLobby(); });
+  NET.peer.on("error", e => { err.textContent = "Online play problem: " + (e.type || e.message); });
+  // heartbeat: a guest who has gone quiet for 45 seconds (closed the page, lost signal) is handed to a computer monkey
+  setInterval(() => {
+    netSend({ t: "ping" });
+    Object.keys(NET.conns).forEach(id => { if (Date.now() - (NET.seen[id] || 0) > 45000) { try { NET.conns[id].close(); } catch (e) {} guestLeft(id); } });
+  }, 3000);
+  NET.peer.on("connection", c => {
+    c.on("data", m => {
+      NET.seen[c.peer] = Date.now();
+      if (m.t === "pong") return;
+      if (m.t === "bye") { guestLeft(c.peer); return; }
+      if (m.t === "hello") {
+        if (S || NET.lobby.length >= 4) { c.send({ t: "full" }); setTimeout(() => c.close(), 300); return; }
+        // keep every color unique: if theirs is taken, hand them a free one
+        let pc = PIECES.find(x => x[1] === m.color) || PIECES[0];
+        if (NET.lobby.some(g => g.color === pc[1])) pc = PIECES.find(x => !NET.lobby.some(g => g.color === x[1]));
+        NET.conns[c.peer] = c;
+        NET.lobby.push({ id: c.peer, name: String(m.name || "Friend").slice(0, 14), kind: pc[0], color: pc[1] });
+        lobbyChanged();
+      } else hostHandle(c.peer, m);
+    });
+    c.on("close", () => guestLeft(c.peer));
+  });
+}
+function lobbyChanged() {
+  if (NET.role !== "host") return;
+  netSend({ t: "lobby", lobby: NET.lobby.map(({ name, kind, color }) => ({ name, kind, color })) });
+  showLobby();
+}
+function lobbyList(list) {
+  return list.map(g => `<span class="lobbyp" style="border-color:${g.color}">${g.kind === "girl" ? "👧" : "👦"} ${g.name}</span>`).join("");
+}
+function showLobby() {
+  const box = $("#lobbyBox");
+  box.hidden = false;
+  const url = location.href.split(/[?#]/)[0];
+  const guests = NET.lobby.length - 1;
+  box.innerHTML = `<h3>🌐 Your online room</h3>
+    <p class="roomcode">${NET.code}</p>
+    <p>Tell your friends to open <b>${url}</b>, tap <b>Join a game</b>, and type this code.</p>
+    <p><b>In the room:</b> ${lobbyList(NET.lobby)}</p>
+    <p><label>Computer monkeys to add <select id="netAI">${[0, 1, 2, 3].filter(n => n + NET.lobby.length <= 4)
+      .map(n => `<option${n === Math.max(0, Math.min(1, 4 - NET.lobby.length)) ? " selected" : ""}>${n}</option>`).join("")}</select></label></p>
+    <button class="primary big" id="netStart"${guests ? "" : " disabled"}>Start online game ▶</button>
+    ${guests ? "" : "<p><small>Waiting for at least one friend to join…</small></p>"}`;
+  $("#netStart").onclick = startOnline;
+}
+function startOnline() {
+  SFX.init();
+  const startMoney = Math.max(5, Math.min(200, +$("#startMoney").value || 25));
+  const ai = +$("#netAI").value || 0;
+  const used = new Set(NET.lobby.map(g => g.color));
+  const free = shuffle(PIECES.filter(p => !used.has(p[1])));
+  const names = shuffle([...AI_NAMES]);
+  const seats = NET.lobby.map(g => ({ name: g.name, human: true, kind: g.kind, color: g.color, remote: g.id === "host" ? null : g.id }));
+  for (let i = 0; i < ai; i++) seats.push({ name: names[i], human: false, kind: free[i][0], color: free[i][1] });
+  S = newState({ name: "x", kind: "girl", color: PIECES[0][1] }, 0, startMoney);
+  S.players = seats.map(s => Object.assign(s, {
+    money: startMoney, bananas: 0, buyPrice: 0, pos: 0, needsBuy: true, hand: ["roll"],
+    cds: [], loan: null, letters: {}, boughtLetter: false
+  }));
+  S.online = true;
+  seats.forEach((s, i) => { if (s.remote) netSend({ t: "start", seat: i }, s.remote); });
+  $("#setup").hidden = true; $("#winner").hidden = true; $("#saveBtn").hidden = true;
+  $("#log").innerHTML = "";
+  drawDice(S.lastMove, S.lastBanana);
+  placeTokens(); drawTraps();
+  render();
+  log(`Online game! ${seats.filter(s => s.human).length} players and ${ai} computer monkey${ai === 1 ? "" : "s"}. Everyone starts with $${startMoney} and a Roll Again card.`);
+  MUSIC.start();
+  play();
+}
+
+// Joining: connect to the host's room and show their game.
+async function joinGame() {
+  const err = $("#netErr"); err.textContent = "";
+  const code = ($("#joinCode").value || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+  if (code.length < 4) { err.textContent = "Type the room code your friend gave you."; return; }
+  try { await loadPeer(); } catch (e) { err.textContent = e.message; return; }
+  SFX.init();
+  NET.role = "guest"; NET.code = code;
+  NET.peer = new Peer();
+  NET.peer.on("error", e => { err.textContent = e.type === "peer-unavailable" ? "No room with that code — check it and try again." : "Online play problem: " + (e.type || e.message); });
+  NET.peer.on("open", () => {
+    const c = NET.peer.connect(PEER_PREFIX + code, { reliable: true, serialization: "json" });
+    NET.host = c;
+    c.on("open", () => {
+      c.send({ t: "hello", name: myName("Friend"), kind: choice.kind, color: choice.color });
+      $("#lobbyBox").hidden = false;
+      $("#lobbyBox").innerHTML = `<h3>🌐 Joined room ${code}</h3><p>Waiting for the host to start the game…</p>`;
+    });
+    c.on("data", m => { NET.lastHost = Date.now(); if (m.t === "ping") toHost({ t: "pong" }); else guestHandle(m); });
+    c.on("close", hostLost);
+    NET.lastHost = Date.now();
+    setInterval(() => { if (Date.now() - NET.lastHost > 45000) hostLost(); }, 3000);
+  });
+  window.addEventListener("pagehide", () => toHost({ t: "bye" }));
+}
+function hostLost() {
+  if (NET.lost || (S && S.winner)) return;
+  NET.lost = true;
+  $("#winTitle").textContent = "Connection lost";
+  $("#winBody").innerHTML = "<p>The connection to the host's game ended. Ask them to start a new room and join again.</p>";
+  $("#winner").hidden = false;
+}
+const toHost = m => { if (NET.host && NET.host.open) NET.host.send(m); };
+// Guest side: show what the host sends.
+let fxQueue = Promise.resolve(), fxBusy = 0, guestCard = null;
+function guestHandle(m) {
+  switch (m.t) {
+    case "lobby": $("#lobbyBox").innerHTML = `<h3>🌐 Joined room ${NET.code}</h3><p><b>In the room:</b> ${lobbyList(m.lobby)}</p><p>Waiting for the host to start the game…</p>`; break;
+    case "full": $("#netErr").textContent = "That game is full or already started."; break;
+    case "start":
+      NET.mySeat = m.seat;
+      $("#setup").hidden = true; $("#saveBtn").hidden = true; $("#log").innerHTML = "";
+      MUSIC.start();
+      break;
+    case "state": {
+      const s = m.s;
+      if (!S || !S.players || S.players.length !== s.players.length) { S = s; placeTokens(); }
+      else {
+        s.players.forEach((np, i) => Object.assign(S.players[i], np));
+        Object.keys(s).forEach(k => { if (k !== "players") S[k] = s[k]; });
+      }
+      renderPlayers(); renderLoan(); drawLetters(); drawTraps();
+      if (!fxBusy) positionTokens();   // pieces still hopping keep going; they settle when the animations finish
+      break;
+    }
+    case "log": addLog(m.html); break;
+    case "watch": $("#action").innerHTML = m.html; break;
+    case "prompt": showRemotePrompt(m.html); break;
+    case "fx":
+      fxBusy++;
+      fxQueue = fxQueue.then(() => guestFx(m.fx, m.a)).catch(() => {}).then(() => { if (--fxBusy === 0 && S && S.players) positionTokens(); });
+      break;
+    case "win": {
+      const w = S.players[m.seat];
+      if (w) { SFX.win(); $("#winTitle").textContent = m.seat === NET.mySeat ? "You win!" : `${w.name} wins!`;
+        $("#winBody").innerHTML = ""; const big = miniToken(w.kind, w.color, true); big.style.width = "120px"; big.style.height = "170px";
+        $("#winBody").appendChild(big); $("#winBody").insertAdjacentHTML("beforeend", `<p>${m.seat === NET.mySeat ? "You" : w.name} spelled <b>MONKEY</b>!</p>`);
+        $("#winner").hidden = false; }
+      break;
+    }
+    case "sfx": if (SFX[m.s]) SFX[m.s](); break;
+  }
+}
+// It's this guest's turn to choose: show the host's prompt with working buttons that report back.
+function showRemotePrompt(html) {
+  const a = $("#action");
+  a.innerHTML = html;
+  a.querySelectorAll("button").forEach((b, i) => { b.onclick = () => { toHost({ t: "click", i }); }; });
+  a.querySelectorAll("input[type=range]").forEach((r, i) => { r.onchange = () => toHost({ t: "range", i, v: +r.value }); });
+}
+// Play an animation the host sent, on this guest's own board.
+async function guestFx(fx, a) {
+  const P = i => S.players[i];
+  switch (fx) {
+    case "dice": await diceFx(a[0], a[1]); drawDice(a[0] === "move" ? a[1] : S.lastMove, a[0] === "banana" ? a[1] : S.lastBanana); break;
+    case "tween": {
+      const p = P(a[0]);
+      p.x = a[4]; p.y = a[5];
+      if (camWanted(p) && camFollow !== p) { await zoomTo(viewAround(tokAt(p), CAM_W), 250); camFollow = p; }
+      await tween(p, a[1], a[2], a[3]); break;
+    }
+    case "cannonFly": await cannonFly(P(a[0]), a[1]); break;
+    case "fly": fly(a[0], a[1], a[2], a[3], a[4]); break;
+    case "float": floatText(a[0], a[1], a[2]); break;
+    case "react": react(P(a[0]), a[1]); break;
+    case "spotlight": camFollow = null; await spotlight(P(a[0])); break;
+    case "camReset": await camReset(); break;
+    case "reveal": guestCard = revealCard(a[0], a[1], a[2], a[3]); await guestCard; break;
+    case "revealClose": if (guestCard) { const close = await guestCard; guestCard = null; await close(); } break;
+    case "dance": await monkeyDance(); break;
+  }
+}
+const netSfx = name => netSend({ t: "sfx", s: name });
 
 // Human prompts. Text, limits and disabled states can be functions, so an open prompt
 // redraws (refreshPrompt) when your money changes — e.g. after a loan.
@@ -1561,24 +1888,25 @@ function askCount(html, maxFn, initial, fmt) {
 // Loan box: the human can borrow or repay at any moment of the game, one loan at a time.
 function renderLoan() {
   const box = $("#loanBox");
-  const p = S && S.players.find(q => q.human);
+  // this device's own player (a guest's seat online, otherwise the local human)
+  const p = S && S.players && (NET.role === "guest" ? S.players[NET.mySeat] : S.players.find(q => q.human && !q.remote));
   box.innerHTML = "";
   if (!p || S.winner) return;
   const b = (label, fn, disabled) => {
     const x = document.createElement("button");
     x.textContent = label; x.disabled = !!disabled;
-    x.onclick = () => { fn(); render(); if (refreshPrompt) refreshPrompt(); };
+    x.onclick = () => { fn(); if (NET.role !== "guest") { render(); if (refreshPrompt) refreshPrompt(); } };
     box.appendChild(x);
   };
   const line = document.createElement("div");
   if (p.loan) {
     line.innerHTML = `🏦 <b>Loan:</b> you owe $${p.loan.repay}. Repay any time.`;
     box.appendChild(line);
-    b(`Repay $${p.loan.repay}`, () => repayLoan(p), p.money < p.loan.repay);
+    b(`Repay $${p.loan.repay}`, () => NET.role === "guest" ? toHost({ t: "loan", a: "repay" }) : repayLoan(p), p.money < p.loan.repay);
   } else {
     line.innerHTML = "🏦 <b>Need money?</b> Borrow any time (no letter cards until it's repaid):";
     box.appendChild(line);
-    LOANS.forEach(l => b(`$${l.borrow} · repay $${l.repay}`, () => takeLoan(p, l)));
+    LOANS.forEach((l, i) => b(`$${l.borrow} · repay $${l.repay}`, () => NET.role === "guest" ? toHost({ t: "loan", a: "take", i }) : takeLoan(p, l)));
   }
 }
 // Shows a drawn card. auto = no OK button: the card stays up long enough to read, then play carries on.
@@ -1587,9 +1915,10 @@ async function showCard(p, title, text, auto = false, kind = "cannon", id = null
   const html = `<div class="cardshow"><b>${title}</b>${text}</div>`;
   const close = await revealCard(kind, title, text, id);
   const bad = id && MB[id].type === "bad";
-  if (p.human && !auto) await ask(html, [{ label: bad ? "Oh no! OK" : "OK", primary: true }]);
+  if (you(p) && !auto) await ask(html, [{ label: bad ? "Oh no! OK" : "OK", primary: true }]);
   else {
-    actionBox().innerHTML = `<p class="status">${p.human ? "You" : p.name} drew a card:</p>${html}`;
+    promptOwner = null;
+    $("#action").innerHTML = `<p class="status">${p.human && !p.remote ? "You" : p.name} drew a card:</p>${html}`;
     await sleep(p.human ? 2200 : speed * 1.8);
   }
   await close();
@@ -2011,7 +2340,7 @@ function cashAtBank(p) {
   const tot = ready.reduce((t, c) => t + c.bank, 0);
   log(`cashes ${ready.length} CD${ready.length > 1 ? "s" : ""} at the Bank for $${tot}.`, p);
   floatText(tokAt(p), `+$${tot}`, "#2e7d32");
-  SFX.coin();
+  SFX.coin(); netSfx("coin");
   react(p, "Happy");
   p.money += tot; p.cds = p.cds.filter(c => !canCash(c)); render();
 }
@@ -2102,7 +2431,7 @@ const canPlay = (p, id) => hasCard(p, id) && !p.cardUsed && myTurn(p);
 function useCard(p, id) {
   p.hand.splice(p.hand.indexOf(id), 1);
   p.cardUsed = true;
-  SFX.flip();
+  SFX.flip(); netSfx("flip");
   log(`plays <b>${MB[id].name}</b>.`, p);
   floatText(tokAt(p), MB[id].name, "#6a1b9a");
   render();
@@ -2110,7 +2439,7 @@ function useCard(p, id) {
 // Offer a saved card at the moment it can help.
 async function offerCard(p, id, question, aiWants, keepLabel = "No thanks") {
   if (!canPlay(p, id)) return false;
-  const use = p.human
+  const use = you(p)
     ? await ask(`${question}<br><small>Uses your <b>${MB[id].name}</b> card (one card per turn).</small>`,
         [{ label: keepLabel, value: false, primary: true }, { label: `🃏 Play ${MB[id].name}`, value: true }])
     : aiWants;
@@ -2133,13 +2462,13 @@ const others = p => S.players.filter(o => o !== p);
 const leader = list => [...list].sort((a, b) => lettersOf(b) - lettersOf(a) || b.money - a.money)[0];
 async function pickTarget(p, prompt, aiPick) {
   const list = others(p);
-  if (!p.human) return aiPick ? aiPick(list) : leader(list);
+  if (!you(p)) return aiPick ? aiPick(list) : leader(list);
   return ask(prompt, list.map(o => ({ label: `${o.name} · 🍌${o.bananas} · $${o.money} · ${lettersOf(o)} letters`, value: o })));
 }
 async function addToHand(p, id) {
   p.hand.push(id);
   if (p.hand.length <= HAND_MAX) return;
-  const out = p.human
+  const out = you(p)
     ? await ask("Your hand is full — you can hold 3 cards. Which one will you throw away?", p.hand.map((c, i) => ({ label: MB[c].name, value: i })))
     : p.hand.reduce((lo, c, i) => KEEP_RANK[c] < KEEP_RANK[p.hand[lo]] ? i : lo, 0);
   log(`throws away ${MB[p.hand[out]].name}.`, p);
@@ -2169,7 +2498,7 @@ async function slideBack(p, steps) {
 async function birthday(p) {
   const givers = S.players.filter(o => o !== p && o.bananas > 0);
   givers.forEach(o => o.bananas--);
-  SFX.cheer();
+  SFX.cheer(); netSfx("cheer");
   react(p, "Happy");
   if (givers.length) setTimeout(() => react(pick(givers), "Mad"), 700);   // somebody isn't thrilled to share
   await Promise.all(givers.map(o => fly("banana", tokAt(o), tokAt(p), 1, { lift: 140 })));
@@ -2216,7 +2545,7 @@ async function doInstant(p, id, depth) {
       break;
     }
     case "lucky": react(p, "Happy"); await gainBananas(p, 3); log("gets 3 free bananas!", p); break;
-    case "coin": p.money += 5; floatText(tokAt(p), "+$5", "#2e7d32"); SFX.coin(); react(p, "Happy"); log("finds $5!", p); break;
+    case "coin": p.money += 5; floatText(tokAt(p), "+$5", "#2e7d32"); SFX.coin(); netSfx("coin"); react(p, "Happy"); log("finds $5!", p); break;
     case "rain":
       react(p, "Happy");
       await Promise.all(S.players.map(o => fly("banana", { x: o.x, y: o.y - 220 }, tokAt(o), o === p ? 3 : 1, { lift: 0 })));
@@ -2278,7 +2607,7 @@ async function startCards(p) {
   const res = { double: false, stay: false };
   const playable = START_CARDS.filter(id => canPlay(p, id) && startOK(p, id));
   let id = null;
-  if (p.human) {
+  if (you(p)) {
     id = await ask(`Your turn! You're on <b>${SPACES[p.pos].n}</b>.` + (playable.length ? " Roll, or play a card first:" : ""),
       [{ label: "🎲 Roll", value: null, primary: true }, ...playable.map(c => ({ label: `🃏 ${MB[c].name}`, value: c }))]);
   } else { await think(); id = AI.startCard(p, playable); }
@@ -2343,7 +2672,7 @@ async function fireCannon(p, depth) {
     log(`draws again: “${card.text}”`, p);
     await showCard(p, "Monkey Cannon", card.text, true);
   }
-  SFX.boom();
+  SFX.boom(); netSfx("boom");
   // forward, to the Surplus or to a Bank is good news; backwards or to the Fruit Inspector is not
   setTimeout(() => react(p, card.b ? "Sad" : card.to === INSPECTOR ? "Mad" : "Happy"), 450);
   let to;
@@ -2375,11 +2704,11 @@ async function exactGift(p) {
 
 // ---------- turn ----------
 async function farmBuy(p) {
-  if (p.human) await ask("You're at the <b>Banana Farm</b>. Roll the Banana Die to set today's price.", [{ label: "🍌 Roll Banana Die", primary: true }]);
+  if (you(p)) await ask("You're at the <b>Banana Farm</b>. Roll the Banana Die to set today's price.", [{ label: "🍌 Roll Banana Die", primary: true }]);
   else { status(`${p.name} is at the Banana Farm…`); await think(); }
   const price = await rollBananaFor(p, " — bananas would cost that much each", true);
   let n;
-  if (p.human) {
+  if (you(p)) {
     n = await askCount(() => `Bananas cost <b>$${price}</b> each today. How many will you buy? (You have $${p.money}.)` +
                              (p.money < price * 3 ? "<br><small>Short on money? Borrow in the Loan box above.</small>" : ""),
                        () => Math.floor(p.money / price), Math.floor(p.money / price), k => `${k} bananas · $${k * price}`);
@@ -2421,14 +2750,14 @@ async function resolve(p, depth) {
     p.bananas = 0; p.needsBuy = true;
     await exactGift(p);   // a gift banana arrives after the old ones spoil
     // the Banana Farm is also a Bank: cash or buy CDs here too
-    if (p.human) await humanBank(p, "the <b>Banana Farm</b> — it's a Bank too");
+    if (you(p)) await humanBank(p, "the <b>Banana Farm</b> — it's a Bank too");
     else await AI.bank(p);
   } else if (s.t === "shop") {
     if (!p.bananas) { log(`lands on ${s.n} with no bananas to sell.`, p); return; }
     const max = Math.min(s.cap, p.bananas);
     let price = Math.max(0, s.price - (S.priceDrop ? 1 : 0));
     let n;
-    if (p.human) n = await askCount(`<b>${s.n}</b> buys up to ${s.cap} bananas for <b>$${price}</b> each` +
+    if (you(p)) n = await askCount(`<b>${s.n}</b> buys up to ${s.cap} bananas for <b>$${price}</b> each` +
                                     (S.priceDrop ? " (Price Drop: $1 less!)" : "") + ". How many will you sell?", max, max, k => `${k} sold · +$${k * price}`);
     else { n = AI.sell(p, s); await think(); }
     if (n && S.priceDrop) { S.priceDrop = false; log(`gets $1 less per banana because of a Price Drop.`, p); }
@@ -2442,12 +2771,12 @@ async function resolve(p, depth) {
     await drawMB(p, depth);
   } else if (s.t === "bank") {
     log("lands on a Bank.", p);
-    if (p.human) await humanBank(p);
+    if (you(p)) await humanBank(p);
     else await AI.bank(p);
   } else if (s.k === "birthday") {
     const got = await birthday(p);
     log(`has a Happy Birthday! Collects ${got} banana${got === 1 ? "" : "s"}.`, p);
-    if (p.human) await ask(`🎂 Happy Birthday! Everyone with bananas gives you one — you got <b>${got}</b>.`, [{ label: "Yay!", primary: true }]);
+    if (you(p)) await ask(`🎂 Happy Birthday! Everyone with bananas gives you one — you got <b>${got}</b>.`, [{ label: "Yay!", primary: true }]);
     else await think();
   } else if (s.k === "inspector") {
     if (!p.bananas) { log("meets the Fruit Inspector with no bananas — nothing to lose.", p); return; }
@@ -2456,7 +2785,7 @@ async function resolve(p, depth) {
       react(p, "Happy");
       return;
     }
-    if (p.human) await ask("🔍 The <b>Fruit Inspector</b> checks your bananas! Roll the Banana Die to see how many you lose.", [{ label: "Roll Banana Die", primary: true }]);
+    if (you(p)) await ask("🔍 The <b>Fruit Inspector</b> checks your bananas! Roll the Banana Die to see how many you lose.", [{ label: "Roll Banana Die", primary: true }]);
     else await think();
     const r = await rollBananaFor(p, " — you'd lose that many bananas");
     const lost = Math.min(r, p.bananas);
@@ -2469,14 +2798,14 @@ async function resolve(p, depth) {
     if (n) { react(p, "Sad"); await loseFx(p, n); }
     p.bananas -= n;
     log(n ? `donates ${n} banana${n === 1 ? "" : "s"} to the Food Drive.` : "has nothing to donate to the Food Drive.", p);
-    if (p.human && n) await ask(`🥫 Food Drive — you donate <b>${n}</b> banana${n === 1 ? "" : "s"}.`, [{ label: "OK", primary: true }]);
+    if (you(p) && n) await ask(`🥫 Food Drive — you donate <b>${n}</b> banana${n === 1 ? "" : "s"}.`, [{ label: "OK", primary: true }]);
   } else if (s.k === "surplus") {
     await exactGift(p);
-    if (p.human) await ask("📦 <b>Surplus Market!</b> Roll the Banana Die — you can buy bananas at 2 for that price.", [{ label: "Roll Banana Die", primary: true }]);
+    if (you(p)) await ask("📦 <b>Surplus Market!</b> Roll the Banana Die — you can buy bananas at 2 for that price.", [{ label: "Roll Banana Die", primary: true }]);
     else await think();
     const r = await rollBananaFor(p, " — 2 bananas would cost that much");
     let pairs;
-    if (p.human) pairs = await askCount(() => `2 bananas for <b>$${r}</b>. How many pairs will you buy? (You have $${p.money}.)`,
+    if (you(p)) pairs = await askCount(() => `2 bananas for <b>$${r}</b>. How many pairs will you buy? (You have $${p.money}.)`,
                                         () => Math.floor(p.money / r), 0, k => `${k * 2} bananas · $${k * r}`);
     else { pairs = AI.surplusPairs(p, r, Math.floor(p.money / r)); await think(); }
     if (pairs) { await buyFx(p, pairs * 2, pairs * r); if (r === 1) react(p, "Happy"); }
@@ -2485,7 +2814,7 @@ async function resolve(p, depth) {
   } else if (s.k === "loss") {
     if (!p.bananas) { log("lands on Sell for Loss with no bananas.", p); return; }
     let sell;
-    if (p.human) sell = await ask(`📉 <b>Sell for Loss!</b> Sell all ${p.bananas} bananas for $1 each?`,
+    if (you(p)) sell = await ask(`📉 <b>Sell for Loss!</b> Sell all ${p.bananas} bananas for $1 each?`,
       [{ label: `Sell all for $${p.bananas}`, value: true }, { label: "Keep them", value: false, primary: true }]);
     else { sell = AI.sellForLoss(p); await think(); }
     if (sell) { await sellFx(p, p.bananas, p.bananas); react(p, badMood()); p.money += p.bananas; log(`sells all ${p.bananas} bananas for $1 each.`, p); p.bananas = 0; }
@@ -2538,7 +2867,7 @@ function humanEnd(p) {
 }
 
 async function takeTurn(p) {
-  if (S.resumeAt === "end") { S.resumeAt = null; render(); await humanEnd(p); return; }
+  if (S.resumeAt === "end") { S.resumeAt = null; render(); you(p); await humanEnd(p); return; }
   S.resumeAt = null;
   S.turnNo = (S.turnNo || 0) + 1;   // counts every turn; used for the hold-a-CD-one-turn rule
   p.boughtLetter = false;
@@ -2547,14 +2876,14 @@ async function takeTurn(p) {
   p.exactLand = false;
   snapshot("start");
   render();
-  if (!p.human) status(`${p.name}'s turn…`);
+  if (!p.human || p.remote) status(`${p.name}'s turn…`);
   if (p.needsBuy) { await farmBuy(p); p.needsBuy = false; }
   if (p.frozen) {
     // frozen by a Freeze! card: skip this move
     p.frozen = false;
     log("is frozen and skips their move! ❄️", p);
     floatText(tokAt(p), "❄️ Frozen!", "#0277bd");
-    if (p.human) await ask("❄️ You're <b>frozen</b> this turn — no move!", [{ label: "Brrr… OK", primary: true }]);
+    if (you(p)) await ask("❄️ You're <b>frozen</b> this turn — no move!", [{ label: "Brrr… OK", primary: true }]);
     else await think();
   } else {
     const plan = await startCards(p);
@@ -2579,7 +2908,7 @@ async function takeTurn(p) {
   }
   await camReset();
   if (S.winner) return;
-  if (p.human) await humanEnd(p);
+  if (you(p)) await humanEnd(p);
   else await AI.endTurn(p);
 }
 
@@ -2598,20 +2927,22 @@ async function play() {
   render();
   const w = S.winner;
   log(`spells <b>MONKEY</b> and wins! 🎉`, w);
+  netSend({ t: "win", seat: seatOf(w) });
   SFX.win();
   setTimeout(() => react(w, "Happy"), 900);
   S.players.filter(o => o !== w).forEach((o, i) => setTimeout(() => react(o, badMood()), 1700 + i * 500));
   unsaved = false;
   try { const sv = JSON.parse(localStorage.getItem(SAVE_KEY)); if (sv && sv.state.id === S.id) localStorage.removeItem(SAVE_KEY); } catch (e) {}
   status(`${w.name} wins!`);
-  $("#winTitle").textContent = w.human ? "You win!" : `${w.name} wins!`;
+  const mine = w.human && !w.remote;
+  $("#winTitle").textContent = mine ? "You win!" : `${w.name} wins!`;
   const body = $("#winBody");
   body.innerHTML = "";
   const big = miniToken(w.kind, w.color, true);
   big.style.width = "120px"; big.style.height = "170px";
   body.appendChild(big);
   const p = document.createElement("p");
-  p.innerHTML = `${w.human ? "You" : w.name} spelled <b>MONKEY</b> in round ${S.round}!`;
+  p.innerHTML = `${mine ? "You" : w.name} spelled <b>MONKEY</b> in round ${S.round}!`;
   body.appendChild(p);
   $("#winner").hidden = false;
 }
@@ -2651,7 +2982,7 @@ function start() {
 const SAVE_KEY = "monkeyCannonSave";
 let lastSnap = null, unsaved = false;
 function snapshot(phase) {
-  if (!S || S.winner || (TEST && !location.search.includes("savetest"))) return;
+  if (!S || S.winner || S.online || (TEST && !location.search.includes("savetest"))) return;
   const skip = new Set(["g", "x", "y", "animating", "resumeAt"]);
   lastSnap = { version: 1, phase, savedAt: Date.now(), state: JSON.parse(JSON.stringify(S, (k, v) => skip.has(k) ? undefined : v)),
                log: $("#log").innerHTML };
@@ -2736,9 +3067,33 @@ const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platfor
 const standalone = matchMedia("(display-mode: standalone)").matches || navigator.standalone;
 $("#iosHint").hidden = !(isIOS && !standalone && location.protocol.startsWith("http"));
 $("#continueBtn").onclick = continueGame;
-$("#againBtn").onclick = () => { $("#winner").hidden = true; showSetup(); };
+$("#againBtn").onclick = () => { if (NET.role) { restart(); return; } $("#winner").hidden = true; showSetup(); };
 $("#saveBtn").onclick = () => saveGame();
-$("#newGame").onclick = () => { if (gameRunning()) $("#confirmNew").hidden = false; else restart(); };
+$("#newGame").onclick = () => {
+  if (NET.role) { if (S && S.winner || confirm("Leave the online game?")) restart(); return; }
+  if (gameRunning()) $("#confirmNew").hidden = false; else restart();
+};
+$("#hostBtn").onclick = () => { $("#hostBtn").disabled = $("#joinBtn").disabled = true; hostGame(); };
+$("#joinBtn").onclick = () => { $("#hostBtn").disabled = $("#joinBtn").disabled = true; joinGame(); };
+// online: animations on the host are replayed on every guest's board
+diceFx = netFx("dice", diceFx);
+tween = netFx("tween", tween, (p, tx, ty, ms) => [seatOf(p), tx, ty, ms, p.x, p.y]);
+cannonFly = netFx("cannonFly", cannonFly, (p, to) => [seatOf(p), to]);
+fly = netFx("fly", fly);
+floatText = netFx("float", floatText);
+react = netFx("react", react, (p, mood) => [seatOf(p), mood]);
+spotlight = netFx("spotlight", spotlight, p => [seatOf(p)]);
+camReset = netFx("camReset", camReset, () => []);
+monkeyDance = netFx("dance", monkeyDance, () => []);
+{
+  const reveal = revealCard;
+  revealCard = async function (...a) {
+    if (NET.role === "host") netSend({ t: "fx", fx: "reveal", a });
+    const close = await reveal(...a);
+    return async () => { if (NET.role === "host") netSend({ t: "fx", fx: "revealClose", a: [] }); await close(); };
+  };
+}
+watchBoxes();
 $("#keepPlaying").onclick = () => { $("#confirmNew").hidden = true; };
 $("#saveAndNew").onclick = () => { if (saveGame()) restart(); else $("#confirmNew").hidden = true; };
 $("#justNew").onclick = restart;
