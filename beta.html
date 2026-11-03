@@ -1550,7 +1550,7 @@ function status(html) {
 // The host's device runs the whole game. Guests join with a room code over a direct peer-to-peer link (PeerJS's
 // free public connection service). Each guest is a human seat: their prompts are sent to their device and their
 // taps come back; everyone gets the board state, the log and the animations.
-const NET = { role: null, peer: null, code: null, conns: {}, lobby: [], mySeat: null, host: null };
+const NET = { role: null, peer: null, code: null, conns: {}, seen: {}, lobby: [], mySeat: null, host: null, lastHost: 0 };
 const PEER_PREFIX = "monkeycannon-";
 function loadPeer() {
   if (window.Peer) return Promise.resolve();
@@ -1587,12 +1587,11 @@ function netFx(name, fn, pack) {
     try { return fn.apply(this, args); } finally { fxNest--; }
   };
 }
-// a prompt box as HTML, with sliders' current positions written in (and optionally every control switched off)
-function boxHtml(box, off) {
+// a prompt box as HTML, with sliders' current positions written in
+function boxHtml(box) {
   const view = box.cloneNode(true);
   const live = box.querySelectorAll("input");
   view.querySelectorAll("input").forEach((x, i) => x.setAttribute("value", live[i].value));
-  if (off) view.querySelectorAll("button, input").forEach(b => b.setAttribute("disabled", ""));
   return view.innerHTML;
 }
 // mirror the host's prompt box to whoever owns it, and the host's status box to everyone else
@@ -1611,8 +1610,10 @@ function watchBoxes() {
     clearTimeout(t2);
     t2 = setTimeout(() => {
       if (NET.role !== "host") return;
-      // guests watch the host's box with its buttons switched off (the remote owner keeps their own prompt)
-      const html = boxHtml($("#action"), true);
+      // guests see the host's status lines; while the host is choosing they're told who they're waiting for
+      // (the remote owner keeps their own prompt)
+      const box = $("#action"), who = promptOwner || (S && S.players[S.turn]);
+      const html = box.querySelector("button, input") && who ? `<p class="status">⏳ Waiting for <b>${who.name}</b>…</p>` : box.innerHTML;
       Object.keys(NET.conns).forEach(id => { if (!(isRemote(promptOwner) && promptOwner.remote === id)) netSend({ t: "watch", html }, id); });
     }, 40);
   }).observe($("#action"), { childList: true, subtree: true, attributes: true, characterData: true });
@@ -1636,7 +1637,7 @@ function hostHandle(id, m) {
 }
 // a guest left: a computer monkey takes over their seat (and answers anything they were in the middle of)
 function guestLeft(id) {
-  const c = NET.conns[id];
+  if (!NET.conns[id]) return;
   delete NET.conns[id];
   if (!S) { NET.lobby = NET.lobby.filter(g => g.id !== id); lobbyChanged(); return; }
   const p = S.players.find(q => q.remote === id);
@@ -1663,8 +1664,16 @@ async function hostGame() {
   NET.peer = new Peer(PEER_PREFIX + NET.code);
   NET.peer.on("open", () => { showLobby(); });
   NET.peer.on("error", e => { err.textContent = "Online play problem: " + (e.type || e.message); });
+  // heartbeat: a guest who has gone quiet for 45 seconds (closed the page, lost signal) is handed to a computer monkey
+  setInterval(() => {
+    netSend({ t: "ping" });
+    Object.keys(NET.conns).forEach(id => { if (Date.now() - (NET.seen[id] || 0) > 45000) { try { NET.conns[id].close(); } catch (e) {} guestLeft(id); } });
+  }, 3000);
   NET.peer.on("connection", c => {
     c.on("data", m => {
+      NET.seen[c.peer] = Date.now();
+      if (m.t === "pong") return;
+      if (m.t === "bye") { guestLeft(c.peer); return; }
       if (m.t === "hello") {
         if (S || NET.lobby.length >= 4) { c.send({ t: "full" }); setTimeout(() => c.close(), 300); return; }
         // keep every color unique: if theirs is taken, hand them a free one
@@ -1745,14 +1754,19 @@ async function joinGame() {
       $("#lobbyBox").hidden = false;
       $("#lobbyBox").innerHTML = `<h3>🌐 Joined room ${code}</h3><p>Waiting for the host to start the game…</p>`;
     });
-    c.on("data", guestHandle);
-    c.on("close", () => {
-      if (S && S.winner) return;
-      $("#winTitle").textContent = "Connection lost";
-      $("#winBody").innerHTML = "<p>The connection to the host's game ended. Ask them to start a new room and join again.</p>";
-      $("#winner").hidden = false;
-    });
+    c.on("data", m => { NET.lastHost = Date.now(); if (m.t === "ping") toHost({ t: "pong" }); else guestHandle(m); });
+    c.on("close", hostLost);
+    NET.lastHost = Date.now();
+    setInterval(() => { if (Date.now() - NET.lastHost > 45000) hostLost(); }, 3000);
   });
+  window.addEventListener("pagehide", () => toHost({ t: "bye" }));
+}
+function hostLost() {
+  if (NET.lost || (S && S.winner)) return;
+  NET.lost = true;
+  $("#winTitle").textContent = "Connection lost";
+  $("#winBody").innerHTML = "<p>The connection to the host's game ended. Ask them to start a new room and join again.</p>";
+  $("#winner").hidden = false;
 }
 const toHost = m => { if (NET.host && NET.host.open) NET.host.send(m); };
 // Guest side: show what the host sends.
