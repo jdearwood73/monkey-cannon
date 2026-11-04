@@ -62,6 +62,17 @@
   .roomcode { font-family: "Luckiest Guy", "Fredoka", sans-serif; font-size: 40px; letter-spacing: 6px; color: #2e7d32; margin: 4px 0; text-align: center; }
   .lobbyp { display: inline-block; border: 3px solid; border-radius: 20px; padding: 2px 10px; margin: 2px 4px 2px 0; background: #fffdf5; }
   #remoteBox { display: none; }
+  /* How to Play video: captions with Coco the narrator */
+  #howto { position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%); width: min(780px, calc(100% - 24px)); z-index: 60;
+           background: #fffde7; border: 5px solid var(--wood); border-radius: 24px; padding: 10px 14px; box-shadow: 0 10px 30px rgba(0,0,0,.45);
+           display: flex; gap: 12px; align-items: center; }
+  #howto[hidden] { display: none; }
+  #howto .face { flex: 0 0 64px; height: 80px; }
+  #howto .face svg { width: 64px; height: 80px; }
+  #howtoText { flex: 1; font-size: 22px; font-weight: 600; color: #3b2a1a; line-height: 1.25; min-height: 56px; }
+  #howto .ctl { display: flex; flex-direction: column; gap: 6px; align-items: stretch; }
+  #howto .ctl small { text-align: center; color: #6d4c41; }
+  @media (max-width: 700px) { #howtoText { font-size: 17px; } #howto .face { flex-basis: 44px; } #howto .face svg { width: 44px; height: 56px; } }
   #publicBox { background: #fff; border-radius: 12px; padding: 4px 12px 10px; margin-top: 8px; }
   .pubroom { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 0; border-bottom: 1px dashed #c8e6c9; }
   .ioshint { font-size: 13px; color: #6d4c41; background: #fff3e0; border-radius: 10px; padding: 6px 10px; margin: 8px 0 0; }
@@ -317,7 +328,8 @@
       </label>
       <label>Starting money $<input id="startMoney" type="number" min="5" max="200" value="25" style="width:70px"></label>
     </div>
-    <p class="center" style="margin-top:18px"><button class="primary big" id="startBtn">Let's play! 🍌</button></p>
+    <p class="center" style="margin-top:18px"><button class="primary big" id="startBtn">Let's play! 🍌</button>
+      <button class="big" id="howtoBtn">🎬 How to play (video)</button></p>
     <div class="online">
       <h3>🌐 Play online with friends</h3>
       <div class="row">
@@ -332,6 +344,17 @@
       <div id="publicBox" hidden></div>
     </div>
     <p class="ioshint center" id="iosHint" hidden>📲 To install on iPhone or iPad: tap the <b>Share</b> button, then <b>Add to Home Screen</b>.</p>
+  </div>
+</div>
+
+<div id="howto" hidden>
+  <div class="face" id="howtoFace"></div>
+  <div id="howtoText"></div>
+  <div class="ctl">
+    <button class="primary" id="howtoNext">Next ⏭</button>
+    <button id="howtoVoice">🔊 Voice on</button>
+    <button id="howtoExit">✖ Exit</button>
+    <small id="howtoStep"></small>
   </div>
 </div>
 
@@ -580,7 +603,7 @@ const CDS = [
 ];
 const LOANS = CDS.map(c => ({ borrow: c.early, repay: c.bank }));
 const LETTERS = ["M", "O", "N", "K", "E", "Y"];
-const LETTER_PRICES = [15, 25, 35, 45];
+const LETTER_PRICES = [10, 20, 30, 40];
 const PIECES = [
   ["girl", "#ec407a", "Pink"], ["girl", "#ab47bc", "Purple"], ["girl", "#ff7043", "Coral"], ["girl", "#26c6da", "Aqua"],
   ["boy", "#1e88e5", "Blue"], ["boy", "#43a047", "Green"], ["boy", "#e53935", "Red"], ["boy", "#fb8c00", "Orange"]
@@ -1855,6 +1878,7 @@ async function guestFx(fx, a) {
     case "react": react(P(a[0]), a[1]); break;
     case "spotlight": camFollow = null; await spotlight(P(a[0])); break;
     case "camReset": await camReset(); break;
+    case "camTurn": await camTurn(P(a[0]), a[1]); break;
     case "reveal": guestCard = revealCard(a[0], a[1], a[2], a[3]); await guestCard; break;
     case "revealClose": if (guestCard) { const close = await guestCard; guestCard = null; await close(); } break;
     case "dance": await monkeyDance(); break;
@@ -2294,10 +2318,30 @@ async function camStart(p) {
   camFollow = p;
   return true;
 }
-function camTrack(p, x, y, w = CAM_W) { if (camFollow === p) setView(viewAround({ x, y }, w)); }
+// Start of a turn: zoom in on the monkey with the next spaces in view, so you can see what you're hoping to land on.
+// The camera then holds still while the monkey hops, only drifting along if it gets near the edge.
+let camHold = false;
+async function camTurn(p, ahead = 6) {
+  if (!camWanted(p)) return;
+  const pts = [tokAt(p)];
+  for (let i = 1; i <= ahead; i++) pts.push(spacePts[(p.pos + i) % N]);
+  const xs = pts.map(q => q.x), ys = pts.map(q => q.y), pad = 90;
+  const x0 = Math.min(...xs) - pad, x1 = Math.max(...xs) + pad, y0 = Math.min(...ys) - pad, y1 = Math.max(...ys) + pad;
+  const w = Math.min(FULL_VIEW[2], Math.max(CAM_W, x1 - x0, (y1 - y0) * 1400 / 1000));
+  await zoomTo(viewAround({ x: (x0 + x1) / 2, y: (y0 + y1) / 2 }, w), 450);
+  camFollow = p; camHold = true;
+}
+function camTrack(p, x, y, w = CAM_W) {
+  if (camFollow !== p) return;
+  if (!camHold) { setView(viewAround({ x, y }, w)); return; }
+  const [vx, vy, vw, vh] = view, m = vw * .16;
+  if (x > vx + m && x < vx + vw - m && y > vy + m && y < vy + vh - m) return;
+  const cx = vx + vw / 2, cy = vy + vh / 2;
+  setView(viewAround({ x: cx + (x - cx) * .12, y: cy + (y - cy) * .12 }, Math.max(vw, w)));
+}
 // make sure the whole board is showing again (end of a move that had no landing spotlight, end of a turn)
 async function camReset() {
-  camFollow = null;
+  camFollow = null; camHold = false;
   if (!FX_OFF && view[2] !== FULL_VIEW[2]) await zoomTo(FULL_VIEW, 380);
 }
 async function spotlight(p) {
@@ -2415,7 +2459,7 @@ const AI = {
       if (opts.length) {
         const [L, price] = opts[0];
         // only play Letter Sale if the discounted letter will actually be bought
-        if (price >= 25 && canPlay(p, "lettersale") && (p.money - (price - 10) >= 6 || (missingLetters.length === 1 && p.money >= price - 10))) {
+        if (price >= 20 && canPlay(p, "lettersale") && (p.money - (price - 10) >= 6 || (missingLetters.length === 1 && p.money >= price - 10))) {
           useCard(p, "lettersale"); p.saleArmed = true;
         }
         const cost = letterCost(p, price);
@@ -2425,6 +2469,14 @@ const AI = {
     if (S.winner) return;
     if (!p.loan && p.money < 4 && p.bananas === 0) { takeLoan(p, LOANS[1]); await think(); }
   },
+  // At the Farm after a $3 banana roll: park some money in a CD, keeping enough for a few bananas.
+  async farmCD(p, price) {
+    if (price < 3 || p.loan) return;
+    const c = [...CDS].reverse().find(c => p.money - c.cost >= 12);
+    if (c) { buyCD(p, c); await think(); }
+  },
+  // pay $2 to double the roll when there's nothing left to sell, to hurry back to the Farm
+  payDouble(p) { return p.bananas === 0 && p.money >= 6 && p.pos > 0 && Math.random() < .7; },
   // At a Bank: cash every CD, then park spare money in the biggest CD it can afford while keeping $25 to spend.
   async bank(p) {
     if (p.cds.some(canCash)) { cashAtBank(p); await think(); }
@@ -2742,8 +2794,18 @@ async function startCards(p) {
   let id = null;
   if (you(p)) {
     id = await ask(`Your turn! You're on <b>${SPACES[p.pos].n}</b>.` + (playable.length ? " Roll, or play a card first:" : ""),
-      [{ label: "🎲 Roll", value: null, primary: true }, ...playable.map(c => ({ label: `🃏 ${MB[c].name}`, value: c }))]);
-  } else { await think(); id = AI.startCard(p, playable); }
+      [{ label: "🎲 Roll", value: null, primary: true },
+       { label: "🎲🎲 Pay $2 to double your roll", value: "pay2", disabled: () => p.money < 2 },
+       ...playable.map(c => ({ label: `🃏 ${MB[c].name}`, value: c }))]);
+  } else { await think(); id = AI.startCard(p, playable) || (AI.payDouble(p) ? "pay2" : null); }
+  if (id === "pay2") {
+    // pay $2 before rolling and the move counts double (still stops at the Banana Farm and the Surplus Market)
+    p.money -= 2; res.double = true;
+    floatText(tokAt(p), "-$2", "#c62828");
+    log("pays $2 to double their roll! 🎲🎲", p);
+    render();
+    return res;
+  }
   if (!id) return res;
   useCard(p, id);
   switch (id) {
@@ -2840,6 +2902,13 @@ async function farmBuy(p) {
   if (you(p)) await ask("You're at the <b>Banana Farm</b>. Roll the Banana Die to set today's price.", [{ label: "🍌 Roll Banana Die", primary: true }]);
   else { status(`${p.name} is at the Banana Farm…`); await think(); }
   const price = await rollBananaFor(p, " — bananas would cost that much each", true);
+  // the Farm is a Bank too: after seeing the price you can put money in a CD instead of pricey bananas
+  if (you(p)) {
+    const go = await ask(`Bananas cost <b>$${price}</b> each today.` + (price === 3 ? " That's pricey — you could save in a CD instead." : "") +
+                         " Buy bananas, or visit the Bank first?",
+      [{ label: "🍌 Buy bananas", value: false, primary: true }, { label: "🏦 Bank (CDs) first", value: true }]);
+    if (go) await humanBank(p, "the <b>Banana Farm</b> — it's a Bank too");
+  } else await AI.farmCD(p, price);
   let n;
   if (you(p)) {
     n = await askCount(() => `Bananas cost <b>$${price}</b> each today. How many will you buy? (You have $${p.money}.)` +
@@ -3019,8 +3088,10 @@ async function takeTurn(p) {
     if (you(p)) await ask("❄️ You're <b>frozen</b> this turn — no move!", [{ label: "Brrr… OK", primary: true }]);
     else await think();
   } else {
+    await camTurn(p);
     const plan = await startCards(p);
     if (S.winner) return;
+    if (plan.double) await camTurn(p, 12);   // a doubled roll can go twice as far: widen the view
     if (plan.stay) {
       log(`stays put on ${SPACES[p.pos].n}.`, p);
       await resolve(p, 0);
@@ -3181,6 +3252,113 @@ window.addEventListener("beforeunload", e => { if (unsaved && gameRunning()) { e
 
 $("#startBtn").onclick = start;
 
+// ---------- How to Play video ----------
+// A narrated tour on the real board: Coco the monkey explains the game while the pieces, dice and cards act it out.
+// Opens from the start screen, or straight away with a link ending in #howto.
+const HOWTO_SCENES = [
+  { say: "Hi! I'm Coco, and this is Monkey Cannon! Let me show you how to play.",
+    do: async (c) => { await zoomTo(viewAround(tokAt(c), 640), 700); react(c, "Happy"); } },
+  { say: "The goal is easy: be the first monkey to spell M, O, N, K, E, Y with letter cards!",
+    do: async () => { await zoomTo(viewAround({ x: 846, y: 566 }, 560), 700); "MONKEY".split("").forEach((L, i) => setTimeout(() => floatText({ x: 770 + i * 30, y: 520 }, L, "#e65100"), i * 350)); } },
+  { say: "Letter cards cost money. And how do monkeys make money? By selling bananas!" },
+  { say: "Every round starts at the Banana Farm. Roll the banana die to see what bananas cost today. One, two, or three dollars each.",
+    do: async () => { await zoomTo(FULL_VIEW, 600); await diceFx("banana", 1); drawDice(S.lastMove, 1); } },
+  { say: "Only one dollar? Hooray! Buy lots and lots of bananas!",
+    do: async (c) => { await zoomTo(viewAround(spacePts[0], 560), 600); await buyFx(c, 12, 12); c.money -= 12; c.bananas += 12; render(); react(c, "Happy"); } },
+  { say: "If bananas cost three dollars, you can visit the bank and save your money in a CD instead." },
+  { say: "Now roll the dice and hop along the jungle path!",
+    do: async (c) => { await zoomTo(FULL_VIEW, 500); await diceFx("move", 3); drawDice(3, 1); await camTurn(c); await moveForward(c, 3); } },
+  { say: "Land on a shop to sell your bananas. Each shop pays a different price, and only buys so many. This waterpark buys ten bananas for two dollars each!",
+    do: async (c) => { await zoomTo(viewAround(spacePts[3], 480), 500); await sellFx(c, 10, 20); c.money += 20; c.bananas -= 10; render(); react(c, "Happy"); } },
+  { say: "Monkey Business spaces give you a free card. Some are great, some are silly, and some are a little bit sneaky!",
+    do: async (c) => { await zoomTo(FULL_VIEW, 500); const close = await revealCard("mb", MB.lucky.name, MB.lucky.text, "lucky"); await sleep(1800); await close(); } },
+  { say: "And if you land on a Monkey Cannon... BOOM! A card tells you where you get shot to!",
+    do: async (c) => { await camReset(); SFX.boom(); await cannonFly(c, 11); react(c, "Happy"); } },
+  { say: "Banks sell CDs. Keep a CD for at least one turn, then cash it at any bank for more money than you paid!",
+    do: async () => { await zoomTo(viewAround(spacePts[4], 480), 700); fly("coin", spacePts[4], { x: spacePts[4].x, y: spacePts[4].y - 80 }, 6); } },
+  { say: "Watch out for the Fruit Inspector! He might take some of your bananas.",
+    do: async (c) => { await zoomTo(viewAround(spacePts[INSPECTOR], 480), 700); react(c, "Mad"); } },
+  { say: "At the end of your turn, you may buy one letter card. The cheapest ones go first, so think about when to buy!",
+    do: async (c) => { await zoomTo(viewAround({ x: 846, y: 566 }, 560), 700); const price = S.rows.M.shift(); c.letters.M = price; c.money -= price;
+                       SFX.coin(); render(); react(c, "Happy"); } },
+  { say: "Need more money? You can borrow a loan any time. But no letter cards until you pay it back!" },
+  { say: "In a hurry? Pay two dollars before you roll, and your roll counts double!",
+    do: async (c) => { await zoomTo(FULL_VIEW, 500); await diceFx("move", 4); drawDice(4, 1); floatText({ x: 715, y: 520 }, "4 × 2 = 8!", "#e65100"); await sleep(900); } },
+  { say: "The Banana Farm and the Surplus Market are hard stops. Everyone stops there! And back at the farm, leftover bananas go rotten, so try to sell them all.",
+    do: async () => { await zoomTo(viewAround(spacePts[SURPLUS], 560), 700); await sleep(1200); await zoomTo(viewAround(spacePts[0], 560), 700); } },
+  { say: "The first monkey to spell MONKEY wins! Ready? Let's go bananas!",
+    do: async () => { await zoomTo(FULL_VIEW, 700); await monkeyDance(); } }
+];
+const HOWTO = { on: false, voice: true, skip: null, audio: null };
+// Coco's lines are recorded narration (audio/howto-01.mp3 …). Without the recording (voice off, or the file
+// can't load) the caption simply stays up for reading time.
+function speak(text, i) {
+  const readTime = () => sleep(Math.max(2200, text.length * 62));
+  if (!HOWTO.voice) return readTime();
+  return new Promise(res => {
+    const a = HOWTO.audio = new Audio(`audio/howto-${String(i + 1).padStart(2, "0")}.mp3`);
+    let done = false;
+    const end = () => { if (!done) { done = true; res(); } };
+    a.onended = end;
+    a.onerror = () => readTime().then(end);
+    a.play().catch(() => readTime().then(end));
+    setTimeout(end, text.length * 120 + 4000);   // never hang if the audio stalls
+  });
+}
+const hush = () => { if (HOWTO.audio) { HOWTO.audio.pause(); HOWTO.audio = null; } };
+async function playHowto() {
+  if (HOWTO.on) return;
+  HOWTO.on = true;
+  SFX.init(); speed = 600; unsaved = false;
+  $("#setup").hidden = true; $("#winner").hidden = true;
+  S = newState({ name: "Coco", kind: "girl", color: PIECES[0][1] }, 1, 25);
+  S.players[1].name = "Bongo"; S.players[1].kind = "boy"; S.players[1].color = PIECES[4][1];
+  S.demo = true;
+  $("#log").innerHTML = "";
+  placeTokens(); drawTraps(); drawLetters(); drawDice(3, 2); render();
+  status("🎬 <b>How to play</b> — watch Coco show you the game!");
+  const coco = S.players[0];
+  $("#howtoFace").innerHTML = ""; $("#howtoFace").appendChild(miniToken(coco.kind, coco.color, true));
+  $("#howto").hidden = false;
+  for (let i = 0; i < HOWTO_SCENES.length && HOWTO.on; i++) {
+    const sc = HOWTO_SCENES[i];
+    $("#howtoText").textContent = sc.say;
+    $("#howtoStep").textContent = `${i + 1} / ${HOWTO_SCENES.length}`;
+    $("#howtoNext").textContent = i === HOWTO_SCENES.length - 1 ? "Play! 🍌" : "Next ⏭";
+    const skipped = new Promise(r => { HOWTO.skip = r; });
+    const act = (sc.do ? sc.do(coco) : Promise.resolve()).catch(() => {});
+    await Promise.race([speak(sc.say, i), skipped]);
+    hush();
+    await act;                       // let the animation finish so scenes don't pile up
+    await Promise.race([sleep(700), skipped]);
+  }
+  if (HOWTO.on) { $("#howtoText").textContent = "That's it! Tap Play to start a game."; $("#howtoNext").textContent = "Play! 🍌"; HOWTO.skip = () => endHowto(); }
+}
+function endHowto() {
+  HOWTO.on = false;
+  hush();
+  unsaved = false;
+  location.href = location.href.split("#")[0];   // back to a fresh start screen
+}
+$("#howtoBtn").onclick = playHowto;
+$("#howtoNext").onclick = () => { if (HOWTO.skip) HOWTO.skip(); };
+$("#howtoExit").onclick = endHowto;
+$("#howtoVoice").onclick = e => {
+  HOWTO.voice = !HOWTO.voice;
+  e.target.textContent = HOWTO.voice ? "🔊 Voice on" : "🔇 Voice off";
+  if (!HOWTO.voice) hush();
+};
+// a shared link to the video (…/#howto): wait for one tap (browsers only allow sound after a tap), then play
+function howtoFromLink() {
+  $("#setup").hidden = true;
+  $("#howtoFace").innerHTML = ""; $("#howtoFace").appendChild(miniToken("girl", PIECES[0][1], true));
+  $("#howtoText").textContent = "Hi! Want to learn how to play Monkey Cannon? Tap Watch!";
+  $("#howtoNext").textContent = "▶ Watch";
+  $("#howtoStep").textContent = "";
+  HOWTO.skip = () => { HOWTO.skip = null; playHowto(); };
+  $("#howto").hidden = false;
+}
+
 // ---------- installable app ----------
 // Offline support (only when the game is served from a web address, not opened as a file).
 if ("serviceWorker" in navigator && location.protocol.startsWith("http") && !TEST)
@@ -3218,6 +3396,7 @@ floatText = netFx("float", floatText);
 react = netFx("react", react, (p, mood) => [seatOf(p), mood]);
 spotlight = netFx("spotlight", spotlight, p => [seatOf(p)]);
 camReset = netFx("camReset", camReset, () => []);
+camTurn = netFx("camTurn", camTurn, (p, ahead = 6) => [seatOf(p), ahead]);
 monkeyDance = netFx("dance", monkeyDance, () => []);
 {
   const reveal = revealCard;
@@ -3245,6 +3424,7 @@ startAmbient();
 drawDice(3, 2);
 drawLetters();
 drawChoices();
+if (location.hash === "#howto" && !TEST) howtoFromLink();
 
 if (TEST) (async () => {
   const out = document.createElement("pre");
