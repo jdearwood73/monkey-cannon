@@ -3289,7 +3289,9 @@ const HOWTO_SCENES = [
   { say: "The first monkey to spell MONKEY wins! Ready? Let's go bananas!",
     do: async () => { await zoomTo(FULL_VIEW, 700); await monkeyDance(); } }
 ];
-const HOWTO = { on: false, voice: true, skip: null, audio: null };
+// set to true once the narration files are in the audio folder (until then the video is captions only)
+const HOWTO_AUDIO = false;
+const HOWTO = { on: false, voice: HOWTO_AUDIO, skip: null, audio: null };
 // Coco's lines are recorded narration (audio/howto-01.mp3 …). Without the recording (voice off, or the file
 // can't load) the caption simply stays up for reading time.
 function speak(text, i) {
@@ -3341,6 +3343,7 @@ function endHowto() {
   location.href = location.href.split("#")[0];   // back to a fresh start screen
 }
 $("#howtoBtn").onclick = playHowto;
+$("#howtoVoice").hidden = !HOWTO_AUDIO;
 $("#howtoNext").onclick = () => { if (HOWTO.skip) HOWTO.skip(); };
 $("#howtoExit").onclick = endHowto;
 $("#howtoVoice").onclick = e => {
