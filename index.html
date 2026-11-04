@@ -1876,7 +1876,7 @@ async function guestFx(fx, a) {
     case "fly": fly(a[0], a[1], a[2], a[3], a[4]); break;
     case "float": floatText(a[0], a[1], a[2]); break;
     case "react": react(P(a[0]), a[1]); break;
-    case "spotlight": camFollow = null; await spotlight(P(a[0])); break;
+    case "spotlight": await spotlight(P(a[0])); break;
     case "camReset": await camReset(); break;
     case "camTurn": await camTurn(P(a[0]), a[1]); break;
     case "reveal": guestCard = revealCard(a[0], a[1], a[2], a[3]); await guestCard; break;
@@ -2169,7 +2169,8 @@ function cardFront(g, kind, title, text, id) {
 async function revealCard(kind, title, text, id) {
   if (FX_OFF) return async () => {};
   const from = PILES[kind], to = { x: 715, y: 520 };
-  const g = el("g", { transform: `translate(${from.x} ${from.y}) scale(.35)` }, $("#fx"));
+  const screen = el("g", { transform: hud() }, $("#fx"));   // the card shows in the middle of the screen, even when zoomed in
+  const g = el("g", { transform: `translate(${from.x} ${from.y}) scale(.35)` }, screen);
   const inner = el("g", { filter: "url(#shadow)" }, g);
   const back = el("g", {}, inner), front = el("g", { display: "none" }, inner);
   cardBack(back, kind);
@@ -2192,7 +2193,7 @@ async function revealCard(kind, title, text, id) {
       g.setAttribute("opacity", 1 - k);
       g.setAttribute("transform", `translate(${to.x} ${to.y - k * 40}) scale(${1 - k * .25})`);
     });
-    g.remove();
+    screen.remove();
   };
 }
 
@@ -2209,7 +2210,7 @@ function dieFace(g, kind, v, size) {
 // A big die tumbles across the clearing, bouncing and spinning, flicking through faces until it lands on the result.
 async function diceFx(kind, final) {
   if (FX_OFF) return;
-  const wrap = el("g", {}, $("#fx"));
+  const wrap = el("g", { transform: hud() }, $("#fx"));
   const shadow = el("ellipse", { rx: 40, ry: 10, fill: "rgba(0,0,0,.25)" }, wrap);
   const die = el("g", { filter: "url(#shadow)" }, wrap);
   const face = el("g", {}, die);
@@ -2296,6 +2297,9 @@ function floatText(at, text, color) {
 const FULL_VIEW = [0, 0, 1400, 1000];
 let view = [...FULL_VIEW];
 function setView(v) { view = v; $("#board").setAttribute("viewBox", v.join(" ")); }
+// Screen layer: things drawn inside it (rolling dice, drawn cards) stay the same size and place on screen
+// however far the board is zoomed in — board coordinates are mapped into the current view.
+const hud = () => `translate(${view[0]} ${view[1]}) scale(${view[2] / FULL_VIEW[2]})`;
 function viewAround(pt, w) {
   const h = w * 1000 / 1400;
   return [Math.max(0, Math.min(1400 - w, pt.x - w / 2)), Math.max(0, Math.min(1000 - h, pt.y - h / 2)), w, h];
@@ -2349,9 +2353,11 @@ async function spotlight(p) {
   // fade the pieces standing on the space so its words show through
   const here = S.players.filter(q => q.pos === p.pos);
   here.forEach(q => { q.g.style.transition = "opacity .3s"; q.g.style.opacity = .2; });
-  await zoomTo(viewAround(spacePts[p.pos], SIZES[p.pos] > 1.3 ? 560 : 440), 450);
+  // during a turn the camera is already zoomed in: just slide over to the landing space and stay there
+  const inTurn = camFollow === p && view[2] < FULL_VIEW[2];
+  await zoomTo(viewAround(spacePts[p.pos], inTurn ? view[2] : SIZES[p.pos] > 1.3 ? 560 : 440), inTurn ? 350 : 450);
   await new Promise(r => setTimeout(r, p.human ? 1500 : Math.max(800, speed * 1.4)));
-  await zoomTo(FULL_VIEW, 400);
+  if (!inTurn) await zoomTo(FULL_VIEW, 400);
   here.forEach(q => { q.g.style.opacity = 1; });
 }
 // A monkey reacts out loud — "Happy", "Sad" or "Mad" — with a face popping up over its piece.
@@ -3079,6 +3085,7 @@ async function takeTurn(p) {
   snapshot("start");
   render();
   if (!p.human || p.remote) status(`${p.name}'s turn…`);
+  await camTurn(p);   // zoom in on this monkey for the whole turn
   if (p.needsBuy) { await farmBuy(p); p.needsBuy = false; }
   if (p.frozen) {
     // frozen by a Freeze! card: skip this move
@@ -3088,7 +3095,6 @@ async function takeTurn(p) {
     if (you(p)) await ask("❄️ You're <b>frozen</b> this turn — no move!", [{ label: "Brrr… OK", primary: true }]);
     else await think();
   } else {
-    await camTurn(p);
     const plan = await startCards(p);
     if (S.winner) return;
     if (plan.double) await camTurn(p, 12);   // a doubled roll can go twice as far: widen the view
@@ -3110,10 +3116,14 @@ async function takeTurn(p) {
       p.exactLand = false;
     }
   }
+  if (!S.winner) {
+    if (you(p)) await humanEnd(p);
+    else await AI.endTurn(p);
+  }
+  // the turn is over: back out to the whole board for a moment before the next monkey goes
+  const zoomed = !FX_OFF && view[2] !== FULL_VIEW[2];
   await camReset();
-  if (S.winner) return;
-  if (you(p)) await humanEnd(p);
-  else await AI.endTurn(p);
+  if (zoomed && !S.winner) await sleep(700);
 }
 
 async function play() {
