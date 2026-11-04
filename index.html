@@ -62,6 +62,15 @@
   .roomcode { font-family: "Luckiest Guy", "Fredoka", sans-serif; font-size: 40px; letter-spacing: 6px; color: #2e7d32; margin: 4px 0; text-align: center; }
   .lobbyp { display: inline-block; border: 3px solid; border-radius: 20px; padding: 2px 10px; margin: 2px 4px 2px 0; background: #fffdf5; }
   #remoteBox { display: none; }
+  .lrow { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px dashed #e0c9a6; }
+  .lrow .L { font-family: "Luckiest Guy", "Fredoka", sans-serif; font-size: 30px; color: #e65100; width: 34px; text-align: center; }
+  .lrow .cards { display: flex; gap: 4px; flex: 1; }
+  .lcard { width: 46px; height: 34px; border-radius: 7px; border: 2px solid #b8860b; background: #ffe082; display: flex;
+           align-items: center; justify-content: center; font-weight: 700; color: #6d3f12; font-size: 14px; }
+  .lcard.next { background: #ffca28; box-shadow: 0 0 0 3px #ff7043; }
+  .lcard.gone { background: #eee; border-color: #ccc; color: #aaa; text-decoration: line-through; }
+  .lrow .owners { min-width: 90px; display: flex; gap: 3px; flex-wrap: wrap; justify-content: flex-end; }
+  .lrow .owners i { width: 16px; height: 16px; border-radius: 50%; display: inline-block; border: 2px solid #fff; box-shadow: 0 0 0 1px #8d5524; }
   /* How to Play video: captions with Coco the narrator */
   #howto { position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%); width: min(780px, calc(100% - 24px)); z-index: 60;
            background: #fffde7; border: 5px solid var(--wood); border-radius: 24px; padding: 10px 14px; box-shadow: 0 10px 30px rgba(0,0,0,.45);
@@ -272,6 +281,7 @@
     <div class="topbar">
       <h2>Monkey Cannon</h2>
       <button id="installBtn" class="small" title="Install Monkey Cannon as an app" hidden>📲 Install</button>
+      <button id="lettersBtn" class="small" title="See all the letter cards">🔤 Letters</button>
       <button id="saveBtn" class="small" title="Save this game so you can continue later">💾 Save</button>
       <button id="newGame" class="small" title="Start over with a new game">New game</button>
     </div>
@@ -344,6 +354,15 @@
       <div id="publicBox" hidden></div>
     </div>
     <p class="ioshint center" id="iosHint" hidden>📲 To install on iPhone or iPad: tap the <b>Share</b> button, then <b>Add to Home Screen</b>.</p>
+  </div>
+</div>
+
+<div class="overlay" id="lettersView" hidden>
+  <div class="modal" style="max-width:520px">
+    <h3 style="font-size:22px;margin-top:0;text-align:center">🔤 Letter Cards</h3>
+    <p class="center" style="margin:0 0 8px;font-size:14px">You can only buy the cheapest card left in each row — one letter per turn, at the end of your turn.</p>
+    <div id="lettersGrid"></div>
+    <p class="center"><button class="primary" id="lettersClose">Back to the game</button></p>
   </div>
 </div>
 
@@ -2414,9 +2433,23 @@ function backDest(pos, steps) {
 }
 
 // ---------- computer monkey strategy ----------
+// Strategies for computer monkeys (used by the simulations; normal play uses "normal").
+//  buy: bananas wanted at a $1/$2/$3 price · reserve: cash kept back after buying a letter
+//  cdKeep: cash kept back when buying a CD (Infinity = never buys CDs) · farmCD: lowest banana price that sends it to the Bank instead
+//  double: when to pay $2 to double the roll
+const STRATS = {
+  normal:   {},
+  eager:    { reserve: 0, cdKeep: Infinity, farmCD: 9 },                 // grabs letters as soon as it can, never saves
+  saver:    { cdKeep: 10, farmCD: 2 },                                   // parks money in CDs whenever it can
+  bulk:     { buy: [99, 99, 99], cdKeep: Infinity, farmCD: 9 },          // spends everything on bananas
+  cautious: { buy: [10, 6, 3], reserve: 10 },                             // small banana orders, keeps a cushion
+  doubler:  { double: p => p.bananas <= 2 && p.money >= 4 && p.pos > 0 }, // races around whenever it's low on bananas
+  steady:   { double: () => false }                                       // never pays to double
+};
+const st = (p, k, d) => { const v = (STRATS[p.strat] || {})[k]; return v === undefined ? d : v; };
 const AI = {
   farmBuy(p, price, max) {
-    const want = price === 1 ? 20 : price === 2 ? 12 : 6;
+    const want = st(p, "buy", [20, 12, 6])[price - 1];
     return Math.min(max, want);
   },
   sell(p, s) {
@@ -2465,11 +2498,11 @@ const AI = {
       if (opts.length) {
         const [L, price] = opts[0];
         // only play Letter Sale if the discounted letter will actually be bought
-        if (price >= 20 && canPlay(p, "lettersale") && (p.money - (price - 10) >= 6 || (missingLetters.length === 1 && p.money >= price - 10))) {
+        if (price >= 20 && canPlay(p, "lettersale") && (p.money - (price - 10) >= st(p, "reserve", 6) || (missingLetters.length === 1 && p.money >= price - 10))) {
           useCard(p, "lettersale"); p.saleArmed = true;
         }
         const cost = letterCost(p, price);
-        if (p.money - cost >= 6 || (missingLetters.length === 1 && p.money >= cost)) { buyLetter(p, L); await think(); }
+        if (p.money - cost >= st(p, "reserve", 6) || (missingLetters.length === 1 && p.money >= cost)) { buyLetter(p, L); await think(); }
       }
     }
     if (S.winner) return;
@@ -2477,17 +2510,17 @@ const AI = {
   },
   // At the Farm after a $3 banana roll: park some money in a CD, keeping enough for a few bananas.
   async farmCD(p, price) {
-    if (price < 3 || p.loan) return;
+    if (price < st(p, "farmCD", 3) || p.loan) return;
     const c = [...CDS].reverse().find(c => p.money - c.cost >= 12);
     if (c) { buyCD(p, c); await think(); }
   },
   // pay $2 to double the roll when there's nothing left to sell, to hurry back to the Farm
-  payDouble(p) { return p.bananas === 0 && p.money >= 6 && p.pos > 0 && Math.random() < .7; },
+  payDouble(p) { return st(p, "double", p => p.bananas === 0 && p.money >= 6 && p.pos > 0 && Math.random() < .7)(p); },
   // At a Bank: cash every CD, then park spare money in the biggest CD it can afford while keeping $25 to spend.
   async bank(p) {
     if (p.cds.some(canCash)) { cashAtBank(p); await think(); }
     if (p.loan) return;
-    const c = [...CDS].reverse().find(c => p.money - c.cost >= 25);
+    const c = [...CDS].reverse().find(c => p.money - c.cost >= st(p, "cdKeep", 25));
     if (c) { buyCD(p, c); await think(); }
   }
 };
@@ -3352,6 +3385,22 @@ function endHowto() {
   unsaved = false;
   location.href = location.href.split("#")[0];   // back to a fresh start screen
 }
+// Letter Cards popup: the whole letter array, even while the board is zoomed in on someone's turn
+function showLetters() {
+  const rows = S && S.rows ? S.rows : Object.fromEntries(LETTERS.map(L => [L, [...LETTER_PRICES]]));
+  const players = S && S.players ? S.players : [];
+  $("#lettersGrid").innerHTML = LETTERS.map(L => {
+    const left = rows[L], gone = LETTER_PRICES.length - left.length;
+    const cards = LETTER_PRICES.map((pr, i) => i < gone ? `<span class="lcard gone">$${pr}</span>`
+      : `<span class="lcard${i === gone ? " next" : ""}">$${pr}</span>`).join("");
+    const owners = players.filter(p => p.letters[L] != null).map(p => `<i title="${p.name}" style="background:${p.color}"></i>`).join("");
+    return `<div class="lrow"><span class="L">${L}</span><span class="cards">${cards}</span><span class="owners">${owners || "<small>nobody yet</small>"}</span></div>`;
+  }).join("");
+  $("#lettersView").hidden = false;
+}
+$("#lettersBtn").onclick = showLetters;
+$("#lettersClose").onclick = () => { $("#lettersView").hidden = true; };
+$("#lettersView").onclick = e => { if (e.target.id === "lettersView") $("#lettersView").hidden = true; };
 $("#howtoBtn").onclick = playHowto;
 $("#howtoVoice").hidden = !HOWTO_AUDIO;
 $("#howtoNext").onclick = () => { if (HOWTO.skip) HOWTO.skip(); };
@@ -3606,19 +3655,28 @@ if (TEST) (async () => {
     clearInterval(window.__robot);
     return;
   }
+  // ?players=2..4 · ?strats=normal,eager,… (one per seat; rotated each game so no strategy keeps the first seat)
+  const Q = new URLSearchParams(location.search);
+  const nPlayers = +(Q.get("players") || 4);
+  const strats = Q.get("strats") ? Q.get("strats").split(",") : null;
+  const turns = [];
   for (let g = 0; g < games; g++) {
-    S = newState({ kind: "girl", color: PIECES[0][1], name: "P1" }, 3, +(new URLSearchParams(location.search).get("money") || 25));
+    S = newState({ kind: "girl", color: PIECES[0][1], name: "P1" }, nPlayers - 1, +(Q.get("money") || 25));
     S.players[0].human = humanSeat;
+    if (strats) S.players.forEach((p, i) => { p.strat = strats[(i + g) % strats.length]; });
     placeTokens();
     await play();
+    turns.push(S.turnNo || 0);
     results.push({ rounds: S.round, winner: S.winner ? S.players.indexOf(S.winner) : -1,
-                   money: S.players.map(p => p.money), letters: S.players.map(p => Object.keys(p.letters).length),
-                   loans: S.players.filter(p => p.loan).length });
+                   strat: S.winner && S.winner.strat, letters: S.players.map(p => Object.keys(p.letters).length) });
   }
   const rounds = results.map(r => r.rounds).sort((a, b) => a - b);
-  out.textContent += `games: ${results.length}\nno winner: ${results.filter(r => r.winner < 0).length}\n` +
-    `rounds min/median/max: ${rounds[0]} / ${rounds[Math.floor(rounds.length / 2)]} / ${rounds[rounds.length - 1]}\n` +
+  const pct = k => rounds[Math.min(rounds.length - 1, Math.floor(rounds.length * k))];
+  out.textContent += `games: ${results.length} · players: ${nPlayers}\nno winner: ${results.filter(r => r.winner < 0).length}\n` +
+    `rounds min/25%/median/75%/max: ${rounds[0]} / ${pct(.25)} / ${pct(.5)} / ${pct(.75)} / ${rounds[rounds.length - 1]}\n` +
+    `average turns per game: ${(turns.reduce((a, b) => a + b, 0) / turns.length).toFixed(1)}\n` +
     `wins by seat: ${[0, 1, 2, 3].map(i => results.filter(r => r.winner === i).length).join(", ")}\n` +
+    (strats ? `wins by strategy: ${[...new Set(strats)].map(s => `${s} ${results.filter(r => r.strat === s).length}`).join(" · ")}\n` : "") +
     `sample: ${JSON.stringify(results.slice(0, 3))}\nclicks: ${out.dataset.clicks || 0}\nDONE\n`;
   clearInterval(window.__robot);   // stop the test robot so the page goes quiet
 })();
