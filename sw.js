@@ -1,7 +1,7 @@
 ﻿// Monkey Cannon offline support. The game page is fetched fresh when online (so updates arrive) and served
 // from the saved copy when offline; icons and fonts are saved the first time they load.
 // publish.ps1 bumps VERSION on every publish so old saved copies are replaced.
-const VERSION = "20261104-110610";
+const VERSION = "20261104-111756";
 const CACHE = "monkey-cannon-" + VERSION;
 const CORE = ["./", "./index.html", "./manifest.webmanifest", "./icons/icon-192.png", "./icons/icon-512.png",
               "./icons/maskable-512.png", "./icons/apple-touch-icon.png", "./icons/favicon-32.png"];

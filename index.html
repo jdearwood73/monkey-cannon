@@ -2436,7 +2436,7 @@ function backDest(pos, steps) {
 // Strategies for computer monkeys (used by the simulations; normal play uses "normal").
 //  buy: bananas wanted at a $1/$2/$3 price · reserve: cash kept back after buying a letter
 //  cdKeep: cash kept back when buying a CD (Infinity = never buys CDs) · farmCD: lowest banana price that sends it to the Bank instead
-//  double: when to pay $2 to double the roll
+//  double: when to pay $1 to double the roll
 const STRATS = {
   normal:   {},
   eager:    { reserve: 0, cdKeep: Infinity, farmCD: 9 },                 // grabs letters as soon as it can, never saves
@@ -2514,7 +2514,7 @@ const AI = {
     const c = [...CDS].reverse().find(c => p.money - c.cost >= 12);
     if (c) { buyCD(p, c); await think(); }
   },
-  // pay $2 to double the roll when there's nothing left to sell, to hurry back to the Farm
+  // pay $1 to double the roll when there's nothing left to sell, to hurry back to the Farm
   payDouble(p) { return st(p, "double", p => p.bananas === 0 && p.money >= 6 && p.pos > 0 && Math.random() < .7)(p); },
   // At a Bank: cash every CD, then park spare money in the biggest CD it can afford while keeping $25 to spend.
   async bank(p) {
@@ -2834,14 +2834,14 @@ async function startCards(p) {
   if (you(p)) {
     id = await ask(`Your turn! You're on <b>${SPACES[p.pos].n}</b>.` + (playable.length ? " Roll, or play a card first:" : ""),
       [{ label: "🎲 Roll", value: null, primary: true },
-       { label: "🎲🎲 Pay $2 to double your roll", value: "pay2", disabled: () => p.money < 2 },
+       { label: "🎲🎲 Pay $1 to double your roll", value: "pay2", disabled: () => p.money < 1 },
        ...playable.map(c => ({ label: `🃏 ${MB[c].name}`, value: c }))]);
   } else { await think(); id = AI.startCard(p, playable) || (AI.payDouble(p) ? "pay2" : null); }
   if (id === "pay2") {
-    // pay $2 before rolling and the move counts double (still stops at the Banana Farm and the Surplus Market)
-    p.money -= 2; res.double = true;
-    floatText(tokAt(p), "-$2", "#c62828");
-    log("pays $2 to double their roll! 🎲🎲", p);
+    // pay $1 before rolling and the move counts double (still stops at the Banana Farm and the Surplus Market)
+    p.money -= 1; res.double = true;
+    floatText(tokAt(p), "-$1", "#c62828");
+    log("pays $1 to double their roll! 🎲🎲", p);
     render();
     return res;
   }
@@ -3325,7 +3325,7 @@ const HOWTO_SCENES = [
     do: async (c) => { await zoomTo(viewAround({ x: 846, y: 566 }, 560), 700); const price = S.rows.M.shift(); c.letters.M = price; c.money -= price;
                        SFX.coin(); render(); react(c, "Happy"); } },
   { say: "Need more money? You can borrow a loan any time. But no letter cards until you pay it back!" },
-  { say: "In a hurry? Pay two dollars before you roll, and your roll counts double!",
+  { say: "In a hurry? Pay one dollar before you roll, and your roll counts double!",
     do: async (c) => { await zoomTo(FULL_VIEW, 500); await diceFx("move", 4); drawDice(4, 1); floatText({ x: 715, y: 520 }, "4 × 2 = 8!", "#e65100"); await sleep(900); } },
   { say: "The Banana Farm and the Surplus Market are hard stops. Everyone stops there! And back at the farm, leftover bananas go rotten, so try to sell them all.",
     do: async () => { await zoomTo(viewAround(spacePts[SURPLUS], 560), 700); await sleep(1200); await zoomTo(viewAround(spacePts[0], 560), 700); } },
