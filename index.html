@@ -62,6 +62,14 @@
   .roomcode { font-family: "Luckiest Guy", "Fredoka", sans-serif; font-size: 40px; letter-spacing: 6px; color: #2e7d32; margin: 4px 0; text-align: center; }
   .lobbyp { display: inline-block; border: 3px solid; border-radius: 20px; padding: 2px 10px; margin: 2px 4px 2px 0; background: #fffdf5; }
   #remoteBox { display: none; }
+  /* map controls: zoom buttons over the board; drag / pinch / scroll-wheel on the board itself */
+  .boardwrap { position: relative; min-width: 0; }
+  #board { touch-action: none; cursor: grab; }
+  #board.dragging { cursor: grabbing; }
+  .mapctl { position: absolute; right: 12px; top: 12px; z-index: 5; display: flex; flex-direction: column; gap: 6px; }
+  .mapctl button { width: 40px; height: 40px; padding: 0; font-size: 20px; line-height: 1; border-radius: 12px;
+                   background: rgba(255,255,255,.92); box-shadow: 0 2px 8px rgba(0,0,0,.3); }
+  @media (max-width: 700px) { .mapctl { right: 6px; top: 6px; gap: 4px; } .mapctl button { width: 34px; height: 34px; font-size: 17px; } }
   .lrow { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px dashed #e0c9a6; }
   .lrow .L { font-family: "Luckiest Guy", "Fredoka", sans-serif; font-size: 30px; color: #e65100; width: 34px; text-align: center; }
   .lrow .cards { display: flex; gap: 4px; flex: 1; }
@@ -185,6 +193,12 @@
 <body>
 
 <div class="app">
+  <div class="boardwrap">
+  <div class="mapctl" aria-label="Map controls">
+    <button id="zoomIn" title="Zoom in">＋</button>
+    <button id="zoomOut" title="Zoom out">－</button>
+    <button id="zoomFit" title="Show the whole board">⤢</button>
+  </div>
   <svg id="board" viewBox="0 0 1400 1000" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Monkey Cannon game board">
     <defs>
       <radialGradient id="grass" cx="50%" cy="45%" r="75%">
@@ -276,6 +290,7 @@
     <g id="tokens"></g>
     <g id="fx"></g>
   </svg>
+  </div>
 
   <aside class="panel">
     <div class="topbar">
@@ -2324,11 +2339,79 @@ function viewAround(pt, w) {
   return [Math.max(0, Math.min(1400 - w, pt.x - w / 2)), Math.max(0, Math.min(1000 - h, pt.y - h / 2)), w, h];
 }
 async function zoomTo(target, ms) {
+  if (userCam) return;   // the player is looking around the map themselves
   const from = [...view];
   await animate(ms, k => {
     const e = k < .5 ? 2 * k * k : 1 - Math.pow(-2 * k + 2, 2) / 2;
-    setView(from.map((v, i) => v + (target[i] - v) * e));
+    if (!userCam) setView(from.map((v, i) => v + (target[i] - v) * e));
   });
+}
+// ---------- map controls: zoom and drag the board yourself ----------
+// Pinch or scroll-wheel to zoom, drag to look around, ⤢ for the whole board. While you're looking around, the
+// automatic camera waits; it takes over again when the turn ends.
+let userCam = false;
+function userView(cx, cy, w) {
+  userCam = true;
+  w = Math.max(320, Math.min(FULL_VIEW[2], w));
+  setView(viewAround({ x: cx, y: cy }, w));
+}
+const viewCenter = () => ({ x: view[0] + view[2] / 2, y: view[1] + view[3] / 2 });
+// board coordinates under a point on the screen
+function boardPt(clientX, clientY) {
+  const r = $("#board").getBoundingClientRect();
+  return { x: view[0] + (clientX - r.left) / r.width * view[2], y: view[1] + (clientY - r.top) / r.height * view[3],
+           fx: (clientX - r.left) / r.width, fy: (clientY - r.top) / r.height };
+}
+// zoom by a factor while keeping the given screen point fixed under the finger / mouse
+function zoomAt(clientX, clientY, factor) {
+  const b = boardPt(clientX, clientY);
+  const w = Math.max(320, Math.min(FULL_VIEW[2], view[2] * factor)), h = w * FULL_VIEW[3] / FULL_VIEW[2];
+  userView(b.x - b.fx * w + w / 2, b.y - b.fy * h + h / 2, w);
+}
+function setupMapControls() {
+  const board = $("#board");
+  $("#zoomIn").onclick = () => { const c = viewCenter(); userView(c.x, c.y, view[2] / 1.4); };
+  $("#zoomOut").onclick = () => { const c = viewCenter(); userView(c.x, c.y, view[2] * 1.4); };
+  $("#zoomFit").onclick = () => userView(700, 500, FULL_VIEW[2]);
+  board.addEventListener("wheel", e => { e.preventDefault(); zoomAt(e.clientX, e.clientY, e.deltaY > 0 ? 1.15 : 1 / 1.15); }, { passive: false });
+  const pts = new Map();
+  let last = null, moved = false;
+  const pinch = () => { const [a, b] = [...pts.values()]; return { d: Math.hypot(a.x - b.x, a.y - b.y), x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }; };
+  board.addEventListener("pointerdown", e => {
+    pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    try { board.setPointerCapture(e.pointerId); } catch (err) {}
+    last = pts.size === 2 ? pinch() : { x: e.clientX, y: e.clientY };
+    moved = false;
+  });
+  board.addEventListener("pointermove", e => {
+    if (!pts.has(e.pointerId)) return;
+    pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    const r = board.getBoundingClientRect(), scale = view[2] / r.width;
+    if (pts.size === 2) {
+      const now = pinch();
+      if (last && last.d) {
+        zoomAt(now.x, now.y, last.d / now.d);
+        const c = viewCenter();
+        userView(c.x - (now.x - last.x) * scale, c.y - (now.y - last.y) * scale, view[2]);
+      }
+      last = now; moved = true;
+    } else if (pts.size === 1 && last) {
+      const dx = e.clientX - last.x, dy = e.clientY - last.y;
+      if (!moved && Math.hypot(dx, dy) < 6) return;
+      moved = true;
+      // whole board showing on a phone: a one-finger drag scrolls the page as usual
+      if (e.pointerType === "touch" && view[2] >= FULL_VIEW[2] && !userCam) window.scrollBy(0, -dy);
+      else { const c = viewCenter(); userView(c.x - dx * scale, c.y - dy * scale, view[2]); board.classList.add("dragging"); }
+      last = { x: e.clientX, y: e.clientY };
+    }
+  });
+  const up = e => {
+    pts.delete(e.pointerId);
+    board.classList.remove("dragging");
+    last = pts.size === 1 ? { ...[...pts.values()][0] } : null;
+  };
+  board.addEventListener("pointerup", up);
+  board.addEventListener("pointercancel", up);
 }
 // Follow camera: while a monkey moves, the board zooms in and tracks it; the landing spotlight then takes over.
 // (Skipped for computer monkeys on Fast, like the spotlight.)
@@ -2355,7 +2438,7 @@ async function camTurn(p, ahead = 6) {
   camFollow = p; camHold = true;
 }
 function camTrack(p, x, y, w = CAM_W) {
-  if (camFollow !== p) return;
+  if (camFollow !== p || userCam) return;
   if (!camHold) { setView(viewAround({ x, y }, w)); return; }
   const [vx, vy, vw, vh] = view, m = vw * .16;
   if (x > vx + m && x < vx + vw - m && y > vy + m && y < vy + vh - m) return;
@@ -2364,7 +2447,7 @@ function camTrack(p, x, y, w = CAM_W) {
 }
 // make sure the whole board is showing again (end of a move that had no landing spotlight, end of a turn)
 async function camReset() {
-  camFollow = null; camHold = false;
+  camFollow = null; camHold = false; userCam = false;   // end of the turn: the automatic camera takes over again
   if (!FX_OFF && view[2] !== FULL_VIEW[2]) await zoomTo(FULL_VIEW, 380);
 }
 async function spotlight(p) {
@@ -2941,13 +3024,15 @@ async function farmBuy(p) {
   if (you(p)) await ask("You're at the <b>Banana Farm</b>. Roll the Banana Die to set today's price.", [{ label: "🍌 Roll Banana Die", primary: true }]);
   else { status(`${p.name} is at the Banana Farm…`); await think(); }
   const price = await rollBananaFor(p, " — bananas would cost that much each", true);
-  // the Farm is a Bank too: after seeing the price you can put money in a CD instead of pricey bananas
+  // the Farm is a Bank too (one visit per Farm stop, here after the price is known): cash CDs, or save in a CD
+  // instead of buying pricey bananas
   if (you(p)) {
+    const ready = p.cds.some(canCash);
     const go = await ask(`Bananas cost <b>$${price}</b> each today.` + (price === 3 ? " That's pricey — you could save in a CD instead." : "") +
-                         " Buy bananas, or visit the Bank first?",
-      [{ label: "🍌 Buy bananas", value: false, primary: true }, { label: "🏦 Bank (CDs) first", value: true }]);
+                         (ready ? " You have a CD ready to cash!" : "") + " Buy bananas, or visit the Bank first?",
+      [{ label: "🍌 Buy bananas", value: false, primary: !ready }, { label: "🏦 Bank (CDs) first", value: true, primary: ready }]);
     if (go) await humanBank(p, "the <b>Banana Farm</b> — it's a Bank too");
-  } else await AI.farmCD(p, price);
+  } else { await AI.bank(p); await AI.farmCD(p, price); }
   let n;
   if (you(p)) {
     n = await askCount(() => `Bananas cost <b>$${price}</b> each today. How many will you buy? (You have $${p.money}.)` +
@@ -2990,9 +3075,7 @@ async function resolve(p, depth) {
     } else log("reaches the Banana Farm.", p);
     p.bananas = 0; p.needsBuy = true;
     await exactGift(p);   // a gift banana arrives after the old ones spoil
-    // the Banana Farm is also a Bank: cash or buy CDs here too
-    if (you(p)) await humanBank(p, "the <b>Banana Farm</b> — it's a Bank too");
-    else await AI.bank(p);
+    // the Farm's Bank opens on the next turn, after the Banana Die is rolled — one bank visit per Farm stop
   } else if (s.t === "shop") {
     if (!p.bananas) { log(`lands on ${s.n} with no bananas to sell.`, p); return; }
     const max = Math.min(s.cap, p.bananas);
@@ -3399,6 +3482,7 @@ function showLetters() {
   $("#lettersView").hidden = false;
 }
 $("#lettersBtn").onclick = showLetters;
+setupMapControls();
 $("#lettersClose").onclick = () => { $("#lettersView").hidden = true; };
 $("#lettersView").onclick = e => { if (e.target.id === "lettersView") $("#lettersView").hidden = true; };
 $("#howtoBtn").onclick = playHowto;
