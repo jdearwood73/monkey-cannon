@@ -2638,9 +2638,11 @@ function sellLetter(p, L) {
   log(`sells the letter <b>${L}</b> back for $${paid - 10}.`, p);
   render();
 }
-// A CD has to be held for at least one turn: one bought this turn can't be cashed until a later turn.
-function buyCD(p, c) { p.money -= c.cost; p.cds.push({ ...c, boughtTurn: S.turnNo }); log(`buys a $${c.cost} CD.`, p); render(); }
-const canCash = c => c.boughtTurn !== S.turnNo;
+// No buying and cashing a CD at the same Bank on the same turn. It can be cashed on a later turn at any Bank,
+// or this turn at a different Bank (say, after a Monkey Cannon card shoots you to the next one).
+// (Bank visits only happen on your own turn, so "here" is where the monkey whose turn it is stands.)
+function buyCD(p, c) { p.money -= c.cost; p.cds.push({ ...c, boughtTurn: S.turnNo, boughtAt: p.pos }); log(`buys a $${c.cost} CD.`, p); render(); }
+const canCash = c => c.boughtTurn !== S.turnNo || c.boughtAt !== S.players[S.turn].pos;
 function cashAtBank(p) {
   const ready = p.cds.filter(canCash);
   if (!ready.length) return;
@@ -2670,9 +2672,9 @@ function humanBank(p, where = "a <b>Bank</b>") {
         const ready = p.cds.filter(canCash), fresh = p.cds.length - ready.length;
         if (ready.length) btn(`Cash ${ready.length > 1 ? "all " + ready.length : "it"} · +$${ready.reduce((t, c) => t + c.bank, 0)}`, () => cashAtBank(p));
         if (fresh) a.insertAdjacentHTML("beforeend",
-          `<p style="font-size:13px;margin:4px 0">🕒 ${fresh} CD${fresh > 1 ? "s" : ""} bought this turn — hold ${fresh > 1 ? "them" : "it"} at least one turn before cashing.</p>`);
+          `<p style="font-size:13px;margin:4px 0">🕒 ${fresh} CD${fresh > 1 ? "s" : ""} bought here this turn — cash ${fresh > 1 ? "them" : "it"} at a different Bank, or on a later turn.</p>`);
       }
-      sec("Buy a CD (cash it at a Bank on a later turn)");
+      sec("Buy a CD (cash it at a different Bank, or on a later turn)");
       CDS.forEach(c => btn(`$${c.cost} CD · pays $${c.bank}`, () => buyCD(p, c), p.money < c.cost));
       const done = document.createElement("div");
       done.style.marginTop = "10px";
